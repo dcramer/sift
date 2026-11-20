@@ -13,6 +13,11 @@ interface BodyPart {
 
 /** Long enough to judge what a message is; short enough to keep a classification cheap. */
 export const MAX_BODY_CHARS = 4000;
+/**
+ * What Inbox keeps of a message's text, which it shows whole: far past any letter a person writes, while bounding what one
+ * row holds and what a pass's batch of 50 holds in memory. HTML is kept as it comes, as for waiting mail.
+ */
+const MAX_MAIL_CHARS = 200_000;
 
 const decode = (data: string) => Buffer.from(data, 'base64url').toString('utf8');
 
@@ -57,7 +62,8 @@ function readable(payload: BodyPart | null | undefined): string {
     .trim();
 }
 
-const shortened = (text: string) => (text.length > MAX_BODY_CHARS ? `${text.slice(0, MAX_BODY_CHARS)}\n[truncated]` : text);
+const cut = (text: string, most: number) => (text.length > most ? `${text.slice(0, most)}\n[truncated]` : text);
+const shortened = (text: string) => cut(text, MAX_BODY_CHARS);
 
 const header = (part: BodyPart, name: string) => part.headers?.find((h) => h.name?.toLowerCase() === name)?.value ?? '';
 
@@ -69,6 +75,8 @@ function hasAttachment(part: BodyPart): boolean {
 /** What sift takes from a whole message: its readable text, its HTML part, and facts about the rest. */
 export interface MessageContent {
   text: string;
+  /** More of the text than `text` holds, up to `MAX_MAIL_CHARS`, for Inbox; absent when `text` is all of it. */
+  whole?: string;
   /** The HTML part as the message carries it, uncleaned. Null when it has none. */
   html: string | null;
   facts: ContentFacts;
@@ -80,6 +88,7 @@ export function readContent(payload: BodyPart | null | undefined): MessageConten
   const whole = readable(payload);
   return {
     text: shortened(whole),
+    ...(whole.length > MAX_BODY_CHARS ? { whole: cut(whole, MAX_MAIL_CHARS) } : {}),
     html,
     facts: {
       hasAttachments: payload ? hasAttachment(payload) : false,
@@ -87,4 +96,9 @@ export function readContent(payload: BodyPart | null | undefined): MessageConten
       ...(html !== null && sender ? htmlFacts(html, sender.domain) : {}),
     },
   };
+}
+
+/** A message's content from all of its text that Inbox holds, as `readContent` gives it. */
+export function heldContent(whole: string, html: string | null, facts: ContentFacts): MessageContent {
+  return { text: shortened(whole), ...(whole.length > MAX_BODY_CHARS ? { whole } : {}), html, facts };
 }

@@ -5,7 +5,7 @@ import type { Mailbox } from '../actions/mailbox.ts';
 import { calls, isConflict, isNotFound, labelKey } from './call.ts';
 import type { Pace } from './quota.ts';
 
-/** Gmail implementation of the Mailbox port. Deliberately has no send, forward, trash or delete. Calls are paced as `createGmailApi`'s are. */
+/** Gmail implementation of the Mailbox port. Deliberately has no forward, trash or delete. Calls are paced as `createGmailApi`'s are. */
 export function createGmailMailbox(auth: OAuth2Client, pace: Pace): Mailbox {
   const client = gmail({ version: 'v1', auth });
   const userId = 'me';
@@ -95,13 +95,22 @@ export function createGmailMailbox(auth: OAuth2Client, pace: Pace): Mailbox {
       return { id: data.id, labelIds: data.labelIds ?? [] };
     },
 
+    async send({ raw, threadId }) {
+      const data = await call('users.messages.send', 100, () =>
+        client.users.messages.send({ userId, requestBody: { raw: Buffer.from(raw).toString('base64url'), ...(threadId ? { threadId } : {}) } }),
+      );
+      if (!data.id || !data.threadId) throw new Error('Gmail did not return an id for the sent message');
+      return { id: data.id, threadId: data.threadId, labelIds: data.labelIds ?? [] };
+    },
+
     async findByMessageId(messageId) {
       // It goes into a search query, so refuse anything that could change the query's meaning.
       if (!/^<[\w.-]+@[\w.-]+>$/.test(messageId)) throw new Error('message id cannot be searched safely');
       const data = await call('users.messages.list', 5, () =>
         client.users.messages.list({ userId, q: `rfc822msgid:${messageId}`, includeSpamTrash: true, maxResults: 1 }),
       );
-      return data.messages?.[0]?.id ?? null;
+      const [found] = data.messages ?? [];
+      return found?.id && found.threadId ? { id: found.id, threadId: found.threadId } : null;
     },
 
     async listFilters() {

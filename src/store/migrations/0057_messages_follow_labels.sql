@@ -1,0 +1,2 @@
+CREATE INDEX "messages_thread" ON "messages" USING btree ("user_id","account_id","thread_id");--> statement-breakpoint
+CREATE INDEX "messages_inbox" ON "messages" USING btree ("account_id","received_at") WHERE "messages"."label_ids" @> '["INBOX"]'::jsonb;

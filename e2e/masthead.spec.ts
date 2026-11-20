@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import type { ManageState } from '../src/dashboard/types.ts';
-import { expect, PHONE, patchJson, pointAt, senderPage, settings, sideScroll, test, tooltip } from './sift.ts';
+import { boxOf, expect, PHONE, patchJson, pointAt, senderPage, settings, sideScroll, test, tooltip } from './sift.ts';
 
 test.describe('When a Google sign-in expired', () => {
   // A service worker's page is out of reach of page.route.
@@ -10,11 +10,16 @@ test.describe('When a Google sign-in expired', () => {
     await patchJson(page, '**/api/manage*', (manage) => ({ ...manage, activity: { ...manage.activity, expired: ['me@example.org'] } }));
     await page.clock.install();
     await page.goto('/rules/r-1');
-    await expect(page.getByRole('heading', { name: 'Rules', level: 1 })).toBeVisible();
+    const heading = page.getByRole('heading', { name: 'Rules', level: 1 });
+    await expect(heading).toBeVisible();
     // The page came drawn with the server's own; a minute on it asks again, and gets the reply above.
     await page.clock.runFor(60_000);
     await page.clock.resume();
-    await expect(page.getByRole('banner').getByText('Google sign-in expired').filter({ visible: true })).toBeVisible();
+    const notice = page.getByRole('status').filter({ hasText: 'Google sign-in expired' });
+    await expect(notice).toBeVisible();
+    // At the top of the page, over its title.
+    const [over, title] = [await boxOf(notice), await boxOf(heading)];
+    expect(over.y + over.height).toBeLessThanOrEqual(title.y);
     await expect(page.getByRole('link', { name: 'Reconnect' }).filter({ visible: true })).toHaveAttribute(
       'href',
       `/auth/login?to=${encodeURIComponent('/rules/r-1')}`,
@@ -34,12 +39,12 @@ test.describe('When a Google sign-in expired', () => {
     const asked = page.waitForResponse('**/api/manage*');
     await page.clock.runFor(60_000);
     await asked;
-    await expect(page.getByRole('banner').getByText(/Google sign-in/)).toHaveCount(0);
+    await expect(page.getByRole('status').filter({ hasText: 'Google sign-in' })).toHaveCount(0);
 
     ends = now + DAY + 2 * HOUR;
     await page.clock.runFor(60_000);
     await page.clock.resume();
-    await expect(page.getByRole('banner').getByText('Google sign-in ends tomorrow at 2:00 PM').filter({ visible: true })).toBeVisible();
+    await expect(page.getByRole('status').filter({ hasText: 'Google sign-in ends tomorrow at 2:00 PM' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Reconnect' }).filter({ visible: true })).toHaveAttribute(
       'href',
       `/auth/login?to=${encodeURIComponent('/labels')}`,
@@ -47,7 +52,7 @@ test.describe('When a Google sign-in expired', () => {
   });
 });
 
-test.describe("The masthead's line", () => {
+test.describe("Sift's line", () => {
   test('says how long since Sift synced and what the model cost over 30 days, and the cost previews each window', async ({ page }) => {
     await page.goto('/');
     const banner = page.getByRole('banner');
@@ -67,11 +72,12 @@ test.describe("The masthead's line", () => {
     await expect(page.getByText('Today', { exact: true }).and(page.locator(':not(th)'))).toBeVisible();
   });
 
-  test('on a phone, the bar is the name, the line and the menu, and the menu shows the costs above the account', async ({ page }) => {
+  test("on a phone, the bar is the menu and the list's search, and the menu shows the line and the costs above the account", async ({ page }) => {
     await page.setViewportSize(PHONE);
     await page.goto('/');
     const banner = page.getByRole('banner');
-    await expect(banner.getByRole('link', { name: /30D$/ }).filter({ visible: true })).toBeVisible();
+    await expect(banner.getByRole('searchbox', { name: 'Search senders and subjects' })).toBeVisible();
+    await expect(banner.getByRole('link', { name: /30D$/ })).toHaveCount(0);
     // The page's title says where you are, right under the bar.
     await expect(banner.getByText('For review').filter({ visible: true })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'For review', level: 1 })).toBeVisible();
@@ -79,6 +85,7 @@ test.describe("The masthead's line", () => {
 
     await page.getByRole('button', { name: 'Menu' }).click();
     const menu = page.getByRole('dialog', { name: 'Menu' });
+    await expect(menu.getByRole('link', { name: /30D$/ })).toHaveText('$0 30D');
     for (const window of ['24H', '7D', '30D']) await expect(menu.getByRole('term').filter({ hasText: window })).toBeVisible();
     await expect(menu.getByText('me@example.org')).toBeVisible();
     await expect(menu.getByRole('button', { name: 'Sign out' })).toBeVisible();
@@ -90,6 +97,29 @@ test.describe("The masthead's line", () => {
 test.describe('The sections', () => {
   // A service worker's page is out of reach of page.route.
   test.use({ serviceWorkers: 'block' });
+
+  test('on a desktop they run down the left of the page, the current one marked', async ({ page }) => {
+    await page.goto('/activity');
+    const sections = page.getByRole('navigation', { name: 'Sections' });
+    const [rail, title] = [await boxOf(sections), await boxOf(page.getByRole('heading', { name: 'Activity', level: 1 }))];
+    expect(rail.x + rail.width).toBeLessThanOrEqual(title.x);
+    expect(rail.height).toBeGreaterThan(rail.width);
+    await expect(sections.getByRole('link', { name: 'Activity' })).toHaveAttribute('aria-current', 'page');
+    await expect(sections.getByRole('link', { name: 'Labels' })).not.toHaveAttribute('aria-current');
+    await expect(page.getByRole('button', { name: 'Menu' })).toHaveCount(0);
+  });
+
+  test('on a phone they are not down the side, and the menu lists them', async ({ page }) => {
+    await page.setViewportSize(PHONE);
+    await page.goto('/activity');
+    await expect(page.getByRole('navigation', { name: 'Sections' })).toHaveCount(0);
+    await page.getByRole('button', { name: 'Menu' }).click();
+    const sections = page.getByRole('dialog', { name: 'Menu' }).getByRole('navigation', { name: 'Sections' });
+    await expect(sections.getByRole('link', { name: 'Activity' })).toHaveAttribute('aria-current', 'page');
+    await sections.getByRole('link', { name: 'Rules' }).click();
+    await expect(page.getByRole('heading', { name: 'Rules', level: 1 })).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Menu' })).toHaveCount(0);
+  });
 
   test('each opens as it is pressed, without waiting on the server', async ({ page }) => {
     // Whatever is asked for on a press waits until the end, as a server starting cold would make it.
@@ -155,7 +185,7 @@ test.describe('While the reader waits', () => {
   });
 });
 
-test.describe("The masthead's line, after a pass with Sift on", () => {
+test.describe("Sift's line, after a pass with Sift on", () => {
   test.use({ variant: 'on' });
 
   test('the cost previews what Sift saved over each window, above what the model cost', async ({ page }) => {

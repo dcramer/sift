@@ -22,11 +22,7 @@ function storedView(): View {
   }
 }
 
-/**
- * A message as sift holds it: its HTML when it has one, or its text when it has none or the reader chose
- * text. Who sent it, to whom and when are in the panel's header. On a wide screen it fills the column it is
- * in and scrolls inside, so what is beside it stays put.
- */
+/** A message as Sift holds it: its HTML when it has one, or its text when it has none or the reader chose text. */
 export function MessageBody({ detail }: { detail: MessageDetail }) {
   const [view, setView] = useState(storedView);
   const html = detail.hasHtml && view === 'html';
@@ -40,7 +36,7 @@ export function MessageBody({ detail }: { detail: MessageDetail }) {
     }
   };
   return (
-    <article className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+    <div className="flex min-w-0 flex-col gap-3">
       {detail.hasHtml ? (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <ChoiceGroup label="Read it as" value={html ? 'html' : 'text'} options={VIEWS} onChange={choose} />
@@ -56,11 +52,9 @@ export function MessageBody({ detail }: { detail: MessageDetail }) {
       ) : reveal(detail.body) === '' ? (
         <p className="text-muted-foreground">This message has no readable text, or is no longer in Gmail.</p>
       ) : (
-        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
-          <div className="max-w-[68ch] text-reading leading-relaxed break-words whitespace-pre-wrap">{reveal(detail.body)}</div>
-        </div>
+        <div className="text-reading leading-relaxed break-words whitespace-pre-wrap">{reveal(detail.body)}</div>
       )}
-    </article>
+    </div>
   );
 }
 

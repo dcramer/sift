@@ -11,7 +11,7 @@ import { Wordmark } from './type.tsx';
 export function Entry({ children }: { children: ReactNode }) {
   const cloud = useContext(Cloud);
   return (
-    <main className="mx-auto flex min-h-svh w-full max-w-[36rem] flex-col justify-center px-5 py-12">
+    <main className="mx-auto flex min-h-svh w-full max-w-[36rem] flex-col justify-center px-5 pt-[calc(3rem+var(--safe-top))] pb-[calc(3rem+var(--safe-bottom))]">
       <div className="relative">
         <h1 className="absolute -top-5 left-6 z-10">
           <Wordmark size="lg" />

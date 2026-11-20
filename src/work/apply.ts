@@ -2,7 +2,7 @@ import { undo } from '../actions/executor.ts';
 import type { Mailbox } from '../actions/mailbox.ts';
 import type { GmailApi } from '../gmail/api.ts';
 import { toFacts } from '../gmail/sync.ts';
-import { recordSynced } from '../store/accounts.ts';
+import { recordFound } from '../store/accounts.ts';
 import { lastStandingChange } from '../store/actions.ts';
 import { isOwnDigest } from '../store/digests.ts';
 import { currentDecision, recordDecision } from '../store/decisions.ts';
@@ -102,19 +102,24 @@ async function planFor(db: Sql, given: Given, ruleId: string, facts: MessageFact
 const sameChange = (a: Decision, b: Decision) =>
   a.disposition === b.disposition && (a.labelId ?? null) === (b.labelId ?? null) && Boolean(a.markRead) === Boolean(b.markRead);
 
-/** Recorded facts, or Gmail's for mail Sift never saw (null when it has gone). */
-async function factsOf(db: Sql, api: Pick<GmailApi, 'getMetadata'>, accountId: string, messageId: string) {
+/**
+ * Recorded facts, or for mail Sift never saw, Gmail's, recorded as they are read so no look reads them again. Null when it has
+ * gone, has left the inbox, or is Sift's own digest.
+ */
+async function factsOf(db: Sql, api: Pick<GmailApi, 'getMetadata'>, accountId: string, messageId: string, now: number) {
   const stored = await getFacts(db, accountId, messageId);
-  if (stored) return { facts: stored, seen: true };
+  if (stored) return stored;
   const raw = await api.getMetadata(messageId);
   const facts = raw ? toFacts(accountId, raw) : null;
-  return facts && facts.labelIds.includes('INBOX') && !(await isOwnDigest(db, facts.headers)) ? { facts, seen: false } : null;
+  if (!facts?.labelIds.includes('INBOX') || (await isOwnDigest(db, facts.headers))) return null;
+  await recordFound(db, accountId, [facts], now);
+  return facts;
 }
 
 /**
  * What applying a rule to the inbox would do, found by searching Gmail and checking the rule on the newest
  * `SAMPLE`: exact when that is all there is, and otherwise scaled to Gmail's estimate of how many match the
- * search, which is rough. Nothing is recorded or changed.
+ * search, which is rough. Nothing is decided or changed; mail Sift had never seen is recorded, out of the triage queue.
  */
 export async function ruleInbox(
   db: Sql,
@@ -130,9 +135,9 @@ export async function ruleInbox(
   const sample = page.ids.slice(0, SAMPLE);
   const checked = await Promise.all(
     sample.map(async (id) => {
-      const message = await factsOf(db, api, accountId, id);
-      const plan = message && (await planFor(db, given, ruleId, message.facts, now));
-      return message && plan ? { facts: message.facts, reads: 'read' in plan } : null;
+      const facts = await factsOf(db, api, accountId, id, now);
+      const plan = facts && (await planFor(db, given, ruleId, facts, now));
+      return facts && plan ? { facts, reads: 'read' in plan } : null;
     }),
   );
   const matched = checked.filter((m) => m !== null);
@@ -162,15 +167,14 @@ export async function applyTo(
 ): Promise<'deciding' | 'reading' | null> {
   const { accountId, rule } = given;
   const ruleId = rule.id;
-  const found = await factsOf(db, gmail.api, accountId, messageId);
+  const found = await factsOf(db, gmail.api, accountId, messageId, now());
   if (!found) return null;
-  const first = await planFor(db, given, ruleId, found.facts, now());
+  const first = await planFor(db, given, ruleId, found, now());
   if (!first) return null;
   if ('decide' in first && first.replaces && !(await takeBack(db, gmail.mailbox, accountId, messageId, now))) return null;
   return await db.transaction(async (tx) => {
-    const plan = await planFor(tx, given, ruleId, found.facts, now());
+    const plan = await planFor(tx, given, ruleId, found, now());
     if (!plan) return null;
-    if (!found.seen) await recordSynced(tx, accountId, [found.facts], now());
     if ('read' in plan) {
       await markApplying(tx, accountId, messageId, ruleId);
       return 'reading';

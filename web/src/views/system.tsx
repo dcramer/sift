@@ -1,13 +1,16 @@
 'use client';
-import { ArrowRightIcon, MegaphoneIcon, PlusIcon, ReplyIcon, SparkleIcon, Trash2Icon } from 'lucide-react';
+import { ActivityIcon, ArrowRightIcon, ListChecksIcon, MegaphoneIcon, PlusIcon, ReplyIcon, SparkleIcon, TagIcon, Trash2Icon, WorkflowIcon } from 'lucide-react';
 import { Fragment, type ReactNode, useState } from 'react';
 import { StatusWord, Verdict } from '@/components/bits.tsx';
 import { ContactHint } from '@/components/sender.tsx';
 import { SiftStatus, UsageDetail } from '@/components/status.tsx';
+import { Mailbox } from '@/lib/narrowed.ts';
 import { ACTIONS, INBOX, INBOX_NAME, STATUS_NAMES, TIERS, inboxFirst, money, moneyTick, outcomeName } from '@/lib/format.ts';
 import {
   Ago,
   Arrived,
+  BarSlot,
+  Heard,
   Heads,
   Blank,
   Does,
@@ -33,6 +36,7 @@ import {
   Facts,
   Failure,
   Field,
+  Finish,
   FieldGroup,
   Figure,
   Figures,
@@ -52,6 +56,7 @@ import {
   LoadingBar,
   MailFrame,
   Marked,
+  MailboxSwitch,
   Masthead,
   Menu,
   Meter,
@@ -63,9 +68,20 @@ import {
   PageFoot,
   PageHeader,
   Panel,
+  AnswerRow,
+  MessageHead,
+  MessageStack,
+  Presses,
+  Reader,
+  ReaderBar,
+  ReplyBox,
+  Rail,
   Reserve,
   Rope,
   RowActions,
+  RowCheck,
+  More,
+  Pager,
   Section,
   Select,
   SomeOf,
@@ -111,6 +127,15 @@ const USAGE = {
   },
 };
 const SYNCED = Date.now() - 20_000;
+const SPECIMEN_ACCOUNTS = [
+  { id: 'ada@example.org', email: 'ada@example.org', lastSyncedAt: SYNCED, primary: true, canSend: false, aliases: [], signInEnds: null },
+];
+const NAV = [
+  { to: 'system', label: 'For review', icon: ListChecksIcon, count: 12 },
+  { to: 'system/activity', label: 'Activity', icon: ActivityIcon },
+  { to: 'system/labels', label: 'Labels', icon: TagIcon },
+  { to: 'system/rules', label: 'Rules', icon: WorkflowIcon },
+];
 const SERIES = TIERS.map((t, index) => ({ key: String(index), name: t.name, color: t.color }));
 const DAYS = [
   [12, 5, 3, 1],
@@ -169,16 +194,30 @@ export function SystemView() {
   const [checked, setChecked] = useState(false);
   const [dialog, setDialog] = useState(false);
   const [panel, setPanel] = useState(false);
+  const [reading, setReading] = useState(false);
   const [search, setSearch] = useState('');
   const [shown, setShown] = useState('');
+  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [made, setMade] = useState('');
   const [labelled, setLabelled] = useState('');
+  const [offset, setOffset] = useState(0);
+  const [mailbox, setMailbox] = useState('');
+  const [bar, setBar] = useState<HTMLDivElement | null>(null);
+  const [view, setView] = useState('all');
+  const mailboxes = { mailboxes: ['ada@example.org', 'ada@work.example.org'], value: mailbox, onChange: setMailbox };
   const toast = useToast();
   const answer = () =>
     toast('Archive as Marketing', {
       undo: () => toast('Back in the inbox'),
       action: { label: 'Same for 2 more', onPress: () => toast('Archive as Marketing: 2 more') },
     });
+  const account = {
+    name: 'ada@example.org',
+    items: [
+      { label: 'Settings', onSelect: () => toast('Settings') },
+      { label: 'Sign out', onSelect: () => toast('Signed out') },
+    ],
+  };
   return (
     // Its parts are shown as a service shows them, with the terms, privacy and security in the fine print.
     <Cloud value>
@@ -263,6 +302,15 @@ export function SystemView() {
                 <Arrived at={SYNCED - 20 * 86_400_000} />
               </p>
             </Row>
+            <Row
+              label="Heard"
+              note="When a message in a conversation came, in its head: the time today, then the day and the time, the year only when it is not this one."
+            >
+              <p className="flex gap-4">
+                <Heard at={SYNCED} />
+                <Heard at={SYNCED - 3 * 86_400_000} />
+              </p>
+            </Row>
             <Row label="Sift does" note="Its icon and its word, the same whether suggested, done or a setting. Never what comes with it.">
               {ACTIONS.map(([key]) => (
                 <Does key={key} action={key}>
@@ -283,10 +331,23 @@ export function SystemView() {
                 <Verdict labelId="marketing" labelName="Marketing" disposition="archive" />
               </p>
             </Row>
-            <Row label="meter" note="How sure Sift is about a label, in three steps. A suggestion's label is its answer button, meter first.">
+            <Row
+              label="meter"
+              note="How sure Sift is about a label, in three steps. A suggestion's label is its answer button, meter first. Unlabelled keeps the bars' room, so a column of answers lines up."
+            >
               <Meter level={1} />
               <Meter level={2} />
               <Meter level={3} />
+              <span className="inline-flex flex-col gap-1">
+                <span className="inline-flex items-baseline gap-2">
+                  <Meter level={2} />
+                  Newsletters
+                </span>
+                <span className="inline-flex items-baseline gap-2">
+                  <Meter level={null} />
+                  Unlabelled
+                </span>
+              </span>
               <Button>
                 <Meter level={3} />
                 Marketing
@@ -318,6 +379,11 @@ export function SystemView() {
                 <Hint icon={ReplyIcon} says="You have written to them" />
               </span>
             </Row>
+            <Row label="hint, said" note="The icon with its words, where they are the point: under a sender's name on their own page.">
+              <span className="text-muted-foreground">
+                <Hint icon={SparkleIcon} says="The first time Sift has seen them" tone="look" said />
+              </span>
+            </Row>
           </Sheet>
         </Section>
 
@@ -342,6 +408,12 @@ export function SystemView() {
               <Button variant="quiet" size="icon" aria-label="Remove" disabled why="You cannot delete your only remaining mailbox.">
                 <Trash2Icon />
               </Button>
+            </Row>
+            <Row label="Finish" note="The ink press that finishes what is written in a layer, with ⌘↵ or Ctrl ↵ from anywhere in it: the composer's Send.">
+              <Finish onClick={() => toast('Lunch', { kind: 'Sent' })}>Send</Finish>
+              <Finish disabled why="Say who it is to.">
+                Send
+              </Finish>
             </Row>
             <Row label="delete" note="Deleting what nothing brings back: its words in red, or a trash can down a list, and one question for every one.">
               <DeleteButton
@@ -521,7 +593,7 @@ export function SystemView() {
           </div>
         </Section>
 
-        <Section title="Page header and section" meta="the top of every page, and the parts under it">
+        <Section title="Page header and section" meta="the top of every page, and the parts under it; the second narrowed to one mailbox">
           <Sheet className="gap-8 p-5">
             <PageHeader
               title="Rules"
@@ -532,6 +604,9 @@ export function SystemView() {
                 </Button>
               }
             />
+            <Mailbox value="ada@work.example.org">
+              <PageHeader title="For review" />
+            </Mailbox>
             <Section title="Proposed rules" meta="2" action={<TextLink href="/system">See all</TextLink>}>
               <p className="text-muted-foreground">A section’s content. No rule or box sets it apart, only space.</p>
             </Section>
@@ -595,6 +670,7 @@ export function SystemView() {
                     ))}
                   </tbody>
                 </Table>
+                <Pager offset={offset} size={50} total={120} onGo={setOffset} />
               </ListView>
             </ListPage>
           </Sheet>
@@ -648,6 +724,58 @@ export function SystemView() {
                     </tbody>
                   ))}
                 </Table>
+              </ListView>
+            </ListPage>
+          </Sheet>
+        </Section>
+
+        <Section
+          title="Rows to select"
+          meta="a check on each row, X on the one the keys are on; what to do with them takes the search's place; more rows load as the end is reached; words typed can be asked"
+        >
+          <Sheet className="p-5">
+            <ListPage title="Inbox">
+              <ListView
+                search={{
+                  value: search,
+                  onChange: setSearch,
+                  placeholder: 'Search',
+                  ask: { onAsk: () => toast('Asks the model to make filters of the words'), busy: false },
+                }}
+                selected={{
+                  count: picked.size,
+                  clear: () => setPicked(new Set()),
+                  actions: [
+                    { label: 'Archive', key: 'e', onPress: () => toast(`Archived ${picked.size}`) },
+                    { label: 'Mark read', key: 'Shift+i', onPress: () => toast(`Marked ${picked.size} read`) },
+                  ],
+                }}
+              >
+                <Table keys>
+                  <Heads>
+                    <Th phone="hide">Select</Th>
+                    <Th>From</Th>
+                    <Th phone="hide">Subject</Th>
+                  </Heads>
+                  <tbody>
+                    {ROWS.map((row) => (
+                      <Tr key={row.address} onOpen={() => setPanel(true)}>
+                        <RowCheck
+                          label={`Select ${row.subject}`}
+                          checked={picked.has(row.address)}
+                          onChange={(on) => setPicked((was) => new Set(on ? [...was, row.address] : [...was].filter((a) => a !== row.address)))}
+                        />
+                        <Td className="max-w-0 md:w-1/3">
+                          <span className="name block truncate">{row.sender}</span>
+                        </Td>
+                        <Td phone="hide" className="max-w-0 md:w-full">
+                          <span className="block truncate">{row.subject}</span>
+                        </Td>
+                      </Tr>
+                    ))}
+                  </tbody>
+                </Table>
+                <More onReach={() => {}} />
               </ListView>
             </ListPage>
           </Sheet>
@@ -829,6 +957,15 @@ export function SystemView() {
                   { label: 'Disabled', note: 'With the reason under it.', disabled: true, onSelect: () => {} },
                 ]}
               />
+              <Menu
+                label="Show"
+                trigger={<span className="flex h-(--control) items-center px-2 font-semibold">Views, the one showing ticked</span>}
+                items={[
+                  ['all', 'Everything'],
+                  ['needs', 'Needs you'],
+                  ['sorted', 'Sorted'],
+                ].map(([key, text]) => ({ label: text, on: key === view, onSelect: () => setView(key) }))}
+              />
               <Notice>Sift cannot be reached</Notice>
               <Notice tone="look" href="/system" action="Reconnect">
                 Google sign-in expired
@@ -898,36 +1035,50 @@ export function SystemView() {
           </Table>
         </Section>
 
-        <Section title="Navigation">
-          <Sheet className="px-4">
-            <Masthead
-              current="system"
-              items={[
-                { to: 'system', label: 'For review', count: 12 },
-                { to: 'system/activity', label: 'Activity' },
-                { to: 'system/rules', label: 'Rules' },
-              ]}
-              status={<Notice>Sift cannot be reached</Notice>}
-              aside={
-                <SiftStatus
-                  accounts={[{ id: 'ada@example.org', email: 'ada@example.org', lastSyncedAt: SYNCED, primary: true, signInEnds: null }]}
-                  usage={USAGE}
-                  plan={null}
-                />
-              }
-              detail={<UsageDetail usage={USAGE} plan={null} />}
-              account={{
-                name: 'ada@example.org',
-                items: [
-                  { label: 'Settings', onSelect: () => toast('Settings') },
-                  { label: 'Sign out', onSelect: () => toast('Signed out') },
-                ],
-              }}
-            />
-          </Sheet>
-          <Sheet className="px-4">
-            <Masthead current="" items={[]} />
-          </Sheet>
+        <Section title="Navigation" meta="the rail on a desktop, the masthead on a phone; the mailbox switch in each, for someone with more than one">
+          <div className="hidden gap-6 md:flex">
+            <Sheet className="flex h-[38rem]">
+              <Rail
+                current="system"
+                items={NAV}
+                aside={<SiftStatus accounts={SPECIMEN_ACCOUNTS} usage={USAGE} plan={null} stacked />}
+                mailbox={mailboxes}
+                account={account}
+                compose={() => {}}
+              />
+            </Sheet>
+            <Sheet className="flex h-[38rem]">
+              <Rail current="" items={[]} />
+            </Sheet>
+          </div>
+          <div className="flex flex-wrap items-end gap-6">
+            <MailboxSwitch {...mailboxes} compact />
+            <div className="w-72">
+              <MailboxSwitch {...mailboxes} />
+            </div>
+          </div>
+          <div className="flex flex-col gap-6 md:hidden">
+            <Sheet className="px-4">
+              <Masthead
+                current="system"
+                items={NAV}
+                aside={<SiftStatus accounts={SPECIMEN_ACCOUNTS} usage={USAGE} plan={null} />}
+                detail={<UsageDetail usage={USAGE} plan={null} />}
+                mailbox={mailboxes}
+                account={account}
+                slot={setBar}
+              />
+              {/* A list's search goes up into the bar. */}
+              <BarSlot value={bar}>
+                <ListView search={{ value: search, onChange: setSearch, placeholder: 'Search mail' }} filters={{ active: [], panel: null }}>
+                  {null}
+                </ListView>
+              </BarSlot>
+            </Sheet>
+            <Sheet className="px-4">
+              <Masthead current="" items={[]} />
+            </Sheet>
+          </div>
         </Section>
 
         <Section title="Document" meta="a page read from top to bottom: /terms, /privacy, /security">
@@ -1002,7 +1153,17 @@ export function SystemView() {
           </div>
         </Section>
 
-        <Section title="Mail frame" meta="a message as its own HTML, in the message panel; this one has nothing to load">
+        <Section title="Reader" meta="a message opened from a list, in the list's place: its bar, Sift's row, the conversation and a reply in place">
+          {reading ? (
+            <SpecimenReader onBack={() => setReading(false)} />
+          ) : (
+            <div>
+              <Button onClick={() => setReading(true)}>Open a message</Button>
+            </div>
+          )}
+        </Section>
+
+        <Section title="Mail frame" meta="a message as its own HTML, in the reader; this one has nothing to load">
           <MailFrame title="An empty message" />
         </Section>
 
@@ -1083,8 +1244,8 @@ export function SystemView() {
         <Panel
           open={panel}
           onClose={() => setPanel(false)}
-          title="Five things to read"
-          subtitle="Example Weekly · Nov 13, 3:21 PM"
+          title="Mail from news@example.com"
+          subtitle="Archive as Newsletters"
           position="1 of 3"
           onNext={() => {}}
           actions={
@@ -1099,11 +1260,163 @@ export function SystemView() {
           }
         >
           <p className="max-w-[68ch] text-reading leading-relaxed">
-            The message on the left; on the right what Sift said, the answer, the sender and the history.
+            One item of a list: a rule, a label, Settings. A message opens in the list’s place instead.
           </p>
         </Panel>
       </main>
     </Cloud>
+  );
+}
+
+const THREAD = [
+  { id: 'a', from: 'Ada Lovelace', address: 'ada@example.org', preview: 'Are you free for lunch on Thursday?', at: 'Nov 10' },
+  { id: 'b', from: 'me', address: 'me@example.org', preview: 'Thursday works. Noon at the usual place?', at: 'Nov 10' },
+  { id: 'c', from: 'Ada Lovelace', address: 'ada@example.org', preview: 'Can Grace come too?', at: 'Nov 11' },
+  { id: 'd', from: 'me', address: 'me@example.org', preview: 'Of course.', at: 'Nov 11' },
+  { id: 'e', from: 'Grace Hopper', address: 'grace@example.net', preview: 'Count me in. I will bring the notes from the review.', at: 'Nov 11' },
+  { id: 'f', from: 'me', address: 'me@example.org', preview: 'See you both there.', at: 'Nov 12' },
+  { id: 'g', from: 'Ada Lovelace', address: 'ada@example.org', preview: 'Noon it is. I will bring the plans.', at: '9:41 AM' },
+];
+const NEWEST = THREAD[THREAD.length - 1];
+
+/**
+ * The reader as Inbox opens a conversation, its middle folded, or (For review) one message with what Sift said beside
+ * it. Answering an earlier message opens the reply box at the foot, saying which it answers.
+ */
+function SpecimenReader({ onBack }: { onBack: () => void }) {
+  const toast = useToast();
+  const [from, setFrom] = useState<'inbox' | 'review'>('inbox');
+  const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set([NEWEST.id]));
+  const [replying, setReplying] = useState<{ title: string; to: (typeof THREAD)[number] } | null>(null);
+  const inbox = from === 'inbox';
+  const toggle = (id: string) => {
+    const next = new Set(open);
+    if (!next.delete(id)) next.add(id);
+    setOpen(next);
+  };
+  const answer = (title: string, to: (typeof THREAD)[number] = NEWEST) => setReplying({ title, to });
+  return (
+    <div className="flex flex-col gap-6">
+      <ChoiceGroup
+        label="Opened from"
+        value={from}
+        options={[
+          ['inbox', 'Inbox'],
+          ['review', 'For review'],
+        ]}
+        onChange={(next) => next && setFrom(next)}
+      />
+      <Reader
+        bar={
+          <ReaderBar
+            back={inbox ? 'Inbox' : 'For review'}
+            onBack={onBack}
+            presses={
+              inbox
+                ? [
+                    { label: 'Archive', key: 'e', onPress: () => toast('Archived') },
+                    { label: 'Mark unread', key: 'Shift+u', quiet: true, onPress: () => toast('Marked unread') },
+                  ]
+                : []
+            }
+            position="2 of 3"
+            onPrevious={() => toast('The one before')}
+            onNext={() => toast('The one after')}
+          />
+        }
+        title="Lunch on Thursday?"
+        answer={
+          <AnswerRow
+            key={from}
+            picker={{
+              label: 'What this message is',
+              value: INBOX,
+              groups: [
+                LABELS.slice(0, 1).map(([id, name]) => ({ id, label: name, lead: <Meter level={2} /> })),
+                LABELS.slice(1).map(([id, name]) => ({ id, label: name })),
+              ],
+              empty: outcomeName('review'),
+              onSubmit: (id) => toast(`Answered: ${LABELS.find(([key]) => key === id)?.[1] ?? id}`),
+            }}
+            why={<p>A reply in a thread you wrote in.</p>}
+            whyOpen={!inbox}
+          >
+            <Button variant="quiet" aria-label="Make a rule…" onClick={() => toast('Opens the rule dialog')}>
+              Rule…
+            </Button>
+          </AnswerRow>
+        }
+        side={
+          inbox ? undefined : (
+            <Section title="Sender">
+              <Facts>
+                <Fact term="Mail">14 messages since Oct 20, 2026</Fact>
+                <Fact term="You wrote">Last week</Fact>
+              </Facts>
+            </Section>
+          )
+        }
+      >
+        <MessageStack messages={inbox ? THREAD : [NEWEST]} open={open} onToggle={toggle}>
+          {(id) => {
+            const m = THREAD.find((one) => one.id === id) ?? NEWEST;
+            return (
+              <>
+                <MessageHead
+                  from={m.from === 'me' ? 'me' : <TextLink href="/system">{m.from}</TextLink>}
+                  {...(m.from === 'me' ? {} : { address: m.address })}
+                  at={m.at.includes(':') ? m.at : `${m.at}, 9:41 AM`}
+                  to={
+                    <>
+                      To <SomeOf items={['me', 'grace@example.net']} />
+                    </>
+                  }
+                  {...(inbox
+                    ? { answers: { reply: () => answer('Reply', m), all: () => answer('Reply to all', m), forward: () => answer('Forward', m) } }
+                    : {})}
+                />
+                <p className="text-reading leading-relaxed">{m.preview}</p>
+              </>
+            );
+          }}
+        </MessageStack>
+        {!inbox ? null : replying ? (
+          <ReplyBox
+            key={`${replying.title}/${replying.to.id}`}
+            label={replying.title}
+            {...(replying.to === NEWEST
+              ? {}
+              : {
+                  about:
+                    replying.title === 'Forward'
+                      ? `Forwarding ${replying.to.from}’s message, ${replying.to.at}`
+                      : `Replying to ${replying.to.from}, ${replying.to.at}`,
+                })}
+            actions={
+              <>
+                <Finish onClick={() => setReplying(null)}>Send</Finish>
+                <Button variant="quiet" onClick={() => setReplying(null)}>
+                  Discard
+                </Button>
+              </>
+            }
+          >
+            <Field inline label="To">
+              <Input aria-label="To" className="flex-1" defaultValue={replying.title === 'Forward' ? '' : `${replying.to.from} <${replying.to.address}>`} />
+            </Field>
+            <TextArea aria-label="Message" className="min-h-44" />
+          </ReplyBox>
+        ) : (
+          <Presses
+            presses={[
+              { label: 'Reply', key: 'r', onPress: () => answer('Reply') },
+              { label: 'Reply all', key: 'a', onPress: () => answer('Reply to all') },
+              { label: 'Forward', key: 'f', onPress: () => answer('Forward') },
+            ]}
+          />
+        )}
+      </Reader>
+    </div>
   );
 }
 

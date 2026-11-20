@@ -99,7 +99,7 @@ export function LabelsView({ loading: loadingRows }: { loading: ReactNode }) {
                           <span className="name">{label.name}</span>
                           {label.id === INBOX ? <span className="text-muted-foreground"> (Default)</span> : null}
                           {/* On a phone what the label is matters more than the room: two lines, not one. */}
-                          <Sub className="max-md:line-clamp-2 max-md:whitespace-normal">{about(label)}</Sub>
+                          <Sub className="phone:line-clamp-2 phone:whitespace-normal">{about(label)}</Sub>
                         </Td>
                         <Td phone="hide" num className="w-48" says={`${percent(label.messages, mail)} of the mail`}>
                           <span className="flex items-center justify-end gap-3">

@@ -18,6 +18,7 @@ test("the page cannot be framed by another site, sends no referrer, and holds no
 test('every screen calls it Sift, and only its wordmark sift', async ({ page }) => {
   for (const [path, heading] of [
     ['/', 'For review'],
+    ['/contacts', 'Contacts'],
     ['/activity', 'Activity'],
     ['/labels', 'Labels'],
     ['/rules', 'Rules'],
@@ -26,7 +27,7 @@ test('every screen calls it Sift, and only its wordmark sift', async ({ page }) 
     await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
     // A word of its own: a command, a path or a Gmail label (`sift/digest`) keeps its spelling.
     await expect(page.locator('main'), path).not.toContainText(/(?<![\w/.@~$-])sift(?![\w/.@-])/);
-    await expect(page.locator('.wordmark'), path).toHaveText('sift');
+    await expect(page.locator('.wordmark').filter({ visible: true }), path).toHaveText('sift');
     await expect(page.locator('[aria-label="sift"]'), path).toHaveCount(0);
   }
 });
@@ -35,6 +36,7 @@ test('each screen is an address of its own, and anything else is missing', async
   const { request } = page;
   for (const path of [
     '/',
+    '/contacts',
     '/activity',
     '/labels',
     '/rules',
@@ -84,14 +86,17 @@ test('the service worker keeps only the built files a page it keeps names', asyn
   await page.reload();
   const chunks = async () => (await kept()).filter((path) => path.startsWith('/_next/static/chunks/'));
   await expect.poll(async () => (await chunks()).length).toBeGreaterThan(0);
-  const current = await kept();
+  // What the page as served names. Next also prefetches other screens' files, which are kept until a prune drops them.
+  const html = await (await page.request.get('/sender')).text();
+  const current = (await kept()).filter((path) => path === '/sender' || html.includes(path));
   // What an older build of Sift left.
   await page.evaluate(`(async () => (await caches.open((await caches.keys())[0])).put('/_next/static/chunks/older-build.js', new Response('')))()`);
   await expect.poll(kept).toContain('/_next/static/chunks/older-build.js');
 
   await page.reload();
   await expect.poll(kept).not.toContain('/_next/static/chunks/older-build.js');
-  expect(await kept()).toEqual(expect.arrayContaining(current));
+  // The page itself is put back as it loads, after the older build's files are gone.
+  await expect.poll(kept).toEqual(expect.arrayContaining(current));
 });
 
 test('built files are kept by the browser for good, read only as what they say they are, and come without their source', async ({ page }) => {
@@ -122,6 +127,7 @@ test("a screen's HTML is drawn for whoever asked, with what Sift does not encryp
   const session = (await (await request.get('/api/session')).json()) as Session;
   for (const [path, heading] of [
     ['/', 'For review'],
+    ['/contacts', 'Contacts'],
     ['/activity', 'Activity'],
     ['/labels', 'Labels'],
     ['/rules', 'Rules'],
@@ -130,7 +136,7 @@ test("a screen's HTML is drawn for whoever asked, with what Sift does not encryp
     expect(html, path).toContain('aria-label="Sections"');
     expect(html, path).toContain('<footer');
     expect(html, path).toMatch(new RegExp(`<h1[^>]*>${heading}</h1>`));
-    // Whose it is, and what For review holds, in the masthead.
+    // Whose it is, and what For review holds, beside the sections.
     expect(html, path).toContain(session.email!);
     expect(html, path).toMatch(new RegExp(`>${manage.waiting}<`));
     if (path === '/labels') for (const label of manage.labels) expect(html, `the labels' HTML names ${label.name}`).toContain(label.name);

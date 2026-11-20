@@ -19,8 +19,9 @@ import {
   moneyTick,
   shortDay,
 } from '@/lib/format.ts';
-import { Button, Empty, Figure, Figures, FilterGroup, ListView, Reserve, Select, Share, StackedBars, TextLink, useToast } from '@/system';
+import { Empty, Figure, Figures, FilterGroup, ListView, Pager, Reserve, Select, Share, StackedBars, TextLink, useToast } from '@/system';
 import { useOpenMessages } from '@/lib/open-messages.ts';
+import { PhoneSiftStatus } from '@/components/status.tsx';
 import { usePlan } from '@/components/model-connect.tsx';
 import { costName } from '@/lib/prices.ts';
 
@@ -160,6 +161,7 @@ export function ActivityView({ loading: loadingRows }: { loading: ReactNode }) {
       intro={
         // What was saved and the chart arrive after the list is drawn, and would push it down. Either may be empty: no gap between them, so an empty one takes no room.
         <div>
+          <PhoneSiftStatus />
           <Reserve id="activity-saved" ready={summary.data !== null} room="min-h-[260px]">
             {summary.data ? <Saved saved={summary.data.saved} days={days} /> : null}
           </Reserve>
@@ -201,19 +203,7 @@ export function ActivityView({ loading: loadingRows }: { loading: ReactNode }) {
       ) : (
         <MailLog rows={data.rows} onOpen={onOpen} onUndo={undo} search={search} labelled={label !== ''} />
       )}
-      {data && data.total > PAGE ? (
-        <div className="flex items-center justify-end gap-2 text-sm text-muted-foreground tabular-nums">
-          <span>
-            {count(offset + 1)}–{count(Math.min(offset + PAGE, data.total))} of {count(data.total)}
-          </span>
-          <Button disabled={offset === 0} onClick={() => goTo(Math.max(0, offset - PAGE))}>
-            Newer
-          </Button>
-          <Button disabled={offset + PAGE >= data.total} onClick={() => goTo(offset + PAGE)}>
-            Older
-          </Button>
-        </div>
-      ) : null}
+      {data ? <Pager offset={offset} size={PAGE} total={data.total} onGo={goTo} /> : null}
     </ListView>
   );
 }

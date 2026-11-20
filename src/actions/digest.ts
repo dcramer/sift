@@ -1,4 +1,4 @@
-import { finishAction, insertPendingAction, openDigestPuts } from '../store/actions.ts';
+import { finishAction, insertPendingAction, openTries } from '../store/actions.ts';
 import type { Sql } from '../store/sql.ts';
 import type { Mailbox } from './mailbox.ts';
 
@@ -19,11 +19,11 @@ export async function putDigest(deps: PutDeps, digest: Put, raw: null): Promise<
 export async function putDigest(deps: PutDeps, digest: Put, raw: string | null): Promise<string | null> {
   const { db, mailbox } = deps;
   const now = deps.now ?? Date.now;
-  const earlier = await openDigestPuts(db, digest.id);
+  const earlier = await openTries(db, 'digest', (payload) => payload.digest === digest.id);
   if (earlier.length > 0) {
     const found = await mailbox.findByMessageId(digest.messageId);
-    for (const id of earlier) await finishAction(db, id, found ? 'done' : 'failed', null, found ? null : 'not in Gmail', now());
-    if (found) return found;
+    for (const { id } of earlier) await finishAction(db, id, found ? 'done' : 'failed', null, found ? null : 'not in Gmail', now());
+    if (found) return found.id;
   }
   if (raw === null) return null;
   const labelIds = ['INBOX', 'UNREAD', await mailbox.ensureLabel(DIGEST_LABEL)];

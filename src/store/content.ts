@@ -17,6 +17,8 @@ import {
   gt,
   inArray,
   labelProposals,
+  mailAsks,
+  mailBodies,
   messages,
   notLike,
   or,
@@ -25,9 +27,10 @@ import {
   ruleFilters,
   rules,
   sql,
-  suggestionBodies,
+  readBodies,
 } from './query.ts';
 import { type RuleMatch, tidyMatch } from '../triage/stages/rules.ts';
+import { searchIndex } from './search.ts';
 import type { Sql } from './sql.ts';
 
 /** What Sift holds of a message that came from the message: its body, and the headers its record keeps. */
@@ -41,6 +44,7 @@ export const actionName = (db: Sql, accountId: string) => `person ${db.person} a
 export const labelProposalName = (db: Sql, accountId: string, field: 'goal' | 'labels' | 'note') =>
   `person ${db.person} label proposal ${field} of ${accountId}`;
 export const ruleDraftName = (db: Sql, accountId: string, field: 'goal' | 'rule') => `person ${db.person} rule draft ${field} of ${accountId}`;
+export const askName = (db: Sql, accountId: string, field: 'words' | 'answer') => `person ${db.person} ask ${field} of ${accountId}`;
 export const digestName = (db: Sql, id: number) => `person ${db.person} digest ${id} highlights`;
 
 /**
@@ -247,7 +251,7 @@ function asLists(stored: unknown): RuleMatch {
 }
 
 /**
- * Rules, proposals, label proposals, rule drafts and digests: few, so read whole. Their conditions are hashed again with the key, and those a
+ * Rules, proposals, label proposals, rule drafts, asks and digests: few, so read whole. Their conditions are hashed again with the key, and those a
  * migration could not hash (`unset:`) are hashed here even without one.
  */
 async function rekeyConditions(db: Sql, prefix: string | null, write: boolean): Promise<void> {
@@ -317,6 +321,13 @@ async function rekeyConditions(db: Sql, prefix: string | null, write: boolean): 
         seal(db, ruleDraftName(db, r.accountId, field), reopen(db, ruleDraftName(db, r.accountId, field), stored));
       return { id: r.id, set: { goal: again('goal', r.goal), rule: r.rule === null ? null : again('rule', r.rule) } };
     });
+  const askUpdates = (await db.select({ id: mailAsks.id, accountId: mailAsks.accountId, words: mailAsks.words, answer: mailAsks.answer }).from(mailAsks))
+    .filter((r) => behind(r.words) || behind(r.answer))
+    .map((r) => {
+      const again = (field: 'words' | 'answer', stored: string) =>
+        seal(db, askName(db, r.accountId, field), reopen(db, askName(db, r.accountId, field), stored));
+      return { id: r.id, set: { words: again('words', r.words), answer: r.answer === null ? null : again('answer', r.answer) } };
+    });
   const digestUpdates = (await db.select({ id: digests.id, highlights: digests.highlights }).from(digests))
     .filter((r) => behind(r.highlights))
     .map((r) => ({ id: r.id, highlights: seal(db, digestName(db, r.id), reopen(db, digestName(db, r.id), r.highlights!)) }));
@@ -324,6 +335,7 @@ async function rekeyConditions(db: Sql, prefix: string | null, write: boolean): 
     await db.transaction(async (tx) => {
       for (const { id, highlights } of digestUpdates) await tx.update(digests).set({ highlights }).where(eq(digests.id, id));
       for (const { id, set } of draftUpdates) await tx.update(ruleDrafts).set(set).where(eq(ruleDrafts.id, id));
+      for (const { id, set } of askUpdates) await tx.update(mailAsks).set(set).where(eq(mailAsks.id, id));
       for (const { id, set } of ruleUpdates) await tx.update(rules).set(set).where(eq(rules.id, id));
       for (const { ruleId, accountId, written } of filterUpdates)
         await tx
@@ -373,21 +385,21 @@ async function rekeyLog(db: Sql, prefix: string, write: boolean): Promise<void> 
   }
 }
 
-/** Mail records, bodies and correspondents. Returns how many messages had something to bring under the key. */
+/** Mail records, the text kept of them and correspondents. Returns how many messages had something to bring under the key. */
 async function rekeyMail(db: Sql, prefix: string, write: boolean): Promise<number> {
   const touched = new Set<string>();
   const bodies = [
     {
-      table: suggestionBodies,
+      table: readBodies,
       rows: await db
         .select({
-          accountId: suggestionBodies.accountId,
-          messageId: suggestionBodies.messageId,
-          text: suggestionBodies.bodyText,
-          html: suggestionBodies.bodyHtml,
+          accountId: readBodies.accountId,
+          messageId: readBodies.messageId,
+          text: readBodies.bodyText,
+          html: readBodies.bodyHtml,
         })
-        .from(suggestionBodies)
-        .where(or(notLike(suggestionBodies.bodyText, `${prefix}%`), notLike(suggestionBodies.bodyHtml, `${prefix}%`))),
+        .from(readBodies)
+        .where(or(notLike(readBodies.bodyText, `${prefix}%`), notLike(readBodies.bodyHtml, `${prefix}%`))),
     },
     {
       table: examples,
@@ -416,6 +428,56 @@ async function rekeyMail(db: Sql, prefix: string, write: boolean): Promise<numbe
           .set({ bodyText: text, bodyHtml: html })
           .where(and(eq(table.accountId, row.accountId), eq(table.messageId, row.messageId)));
     });
+
+  // Inbox keeps the text of a whole inbox, so it is read in batches, as mail records are. Its search index is made again
+  // with the text, under the new key's search key; one there was none of yet is left to the pass.
+  for (let after: { accountId: string; messageId: string } | null = null; ;) {
+    const rows = await db
+      .select({
+        accountId: mailBodies.accountId,
+        messageId: mailBodies.messageId,
+        text: mailBodies.bodyText,
+        html: mailBodies.bodyHtml,
+        indexed: sql<boolean>`${mailBodies.search} IS NOT NULL`,
+        headers: messages.headers,
+      })
+      .from(mailBodies)
+      .innerJoin(messages, and(eq(messages.accountId, mailBodies.accountId), eq(messages.id, mailBodies.messageId)))
+      .where(
+        and(
+          or(notLike(mailBodies.bodyText, `${prefix}%`), notLike(mailBodies.bodyHtml, `${prefix}%`)),
+          after
+            ? or(gt(mailBodies.accountId, after.accountId), and(eq(mailBodies.accountId, after.accountId), gt(mailBodies.messageId, after.messageId)))
+            : undefined,
+        ),
+      )
+      .orderBy(asc(mailBodies.accountId), asc(mailBodies.messageId))
+      .limit(BATCH);
+    if (rows.length === 0) break;
+    const resealed = rows
+      .filter((r) => stale(db, r.text) || stale(db, r.html))
+      .map((r) => {
+        const text = forRekey(db, r.accountId, r.messageId, 'text', r.text)!;
+        const envelope = envelopeFrom(forRekey(db, r.accountId, r.messageId, 'headers', r.headers)) as Envelope;
+        return {
+          ...r,
+          text: sealPart(db, r.accountId, r.messageId, 'text', text)!,
+          html: sealPart(db, r.accountId, r.messageId, 'html', forRekey(db, r.accountId, r.messageId, 'html', r.html)),
+          search: r.indexed ? searchIndex(db, { text, fromName: envelope.fromName, fromAddress: envelope.fromAddress, subject: envelope.subject }) : null,
+        };
+      });
+    for (const r of resealed) touched.add(`${r.accountId}\n${r.messageId}`);
+    if (write)
+      await db.transaction(async (tx) => {
+        for (const r of resealed)
+          await tx
+            .update(mailBodies)
+            .set({ bodyText: r.text, bodyHtml: r.html, search: r.search })
+            .where(and(eq(mailBodies.accountId, r.accountId), eq(mailBodies.messageId, r.messageId)));
+      });
+    const last: { accountId: string; messageId: string } = rows.at(-1)!;
+    after = { accountId: last.accountId, messageId: last.messageId };
+  }
 
   // A record's hashes are made with the key its headers are encrypted with, so the headers say whether both are current.
   let after: { accountId: string; id: string } | null = null;

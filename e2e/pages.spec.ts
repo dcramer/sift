@@ -6,14 +6,16 @@ import {
   expect,
   messageQuery,
   openMessage,
-  panel,
-  panelHeading,
+  back,
+  reader,
+  readerHeading,
   param,
   patchJson,
   path,
   PHONE,
   query,
   row,
+  section,
   senderPage,
   sideScroll,
   test,
@@ -126,12 +128,12 @@ test.describe('Activity', () => {
     await param(page, 'show').toBe('all');
     await expect(open).toContainText('of 21');
 
-    await open.getByRole('button', { name: 'J → Next' }).click();
-    await expect(panelHeading(page, 'Notes from the review')).toBeVisible();
+    await open.getByRole('button', { name: 'Next', exact: true }).click();
+    await expect(readerHeading(page, 'Notes from the review')).toBeVisible();
     await param(page, 'message').toBe('m7');
 
-    await open.getByRole('button', { name: 'Close' }).click();
-    await expect(panel(page)).toHaveCount(0);
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await expect(page).toHaveURL(/\/activity\?show=all$/);
     await expect(rows(page)).toHaveCount(21);
   });
@@ -140,15 +142,15 @@ test.describe('Activity', () => {
     await page.goto('/activity?show=all');
     await openMessage(page, 'Lunch on Thursday?');
     await page.goBack();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
     await expect(page).toHaveURL(/\/activity\?show=all$/);
   });
 
   test('a message opened by its address on Activity closes to Activity alone', async ({ page }) => {
     await page.goto(`/activity?${messageQuery('m6')}`);
-    await expect(panelHeading(page, 'Lunch on Thursday?')).toBeVisible();
-    await panel(page).getByRole('button', { name: 'Close' }).click();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(readerHeading(page, 'Lunch on Thursday?')).toBeVisible();
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await path(page).toBe('/activity');
     await query(page).toBe('');
     await expect(page.getByRole('heading', { name: 'Activity', level: 1 })).toBeVisible();
@@ -178,7 +180,7 @@ test.describe('A sender', () => {
     await expect(page.getByRole('heading', { name: 'notifications@code.example.com', level: 1 })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Answer 8 waiting' })).toBeVisible();
 
-    const names = page.getByRole('table').first();
+    const names = section(page, 'Names');
     await expect(rows(page).filter({ has: page.getByRole('button', { name: 'Make a rule…' }) })).toHaveCount(4);
     await expect(names.getByRole('row', { name: /^Dependabot 3 · 38%/ })).toContainText('Notifications');
     await expect(names.getByRole('row', { name: /^Security alerts 2 · 25%/ })).toContainText('Account alerts');
@@ -191,7 +193,7 @@ test.describe('A sender', () => {
 
   test('From narrows their mail to one name, and is kept in the address', async ({ page }) => {
     await page.goto(SENDER);
-    const mail = rows(page, page.getByRole('table').nth(1));
+    const mail = rows(page, section(page, 'Their mail'));
     await expect(mail).toHaveCount(8);
     await page.getByRole('combobox', { name: 'From' }).click();
     await page.getByRole('option', { name: 'Dependabot' }).click();
@@ -229,8 +231,8 @@ test.describe('A sender', () => {
     await openMessage(page, 'Bump zod from 4.0.0 to 4.0.2');
     await param(page, 'message').not.toBeNull();
 
-    await panel(page).getByRole('button', { name: 'Close' }).click();
-    await expect(panel(page)).toHaveCount(0);
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await path(page).toBe(SENDER);
     await query(page).toBe('');
   });
@@ -238,9 +240,9 @@ test.describe('A sender', () => {
   test('Answer 8 waiting steps through what waits on the reader', async ({ page }) => {
     await page.goto(SENDER);
     await page.getByRole('button', { name: 'Answer 8 waiting' }).click();
-    await expect(panel(page)).toContainText('1 of 8');
-    await panel(page).getByRole('button', { name: 'Close' }).click();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toContainText('1 of 8');
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
   });
 
@@ -255,14 +257,14 @@ test.describe('A sender', () => {
     await page.goto('/');
     await (await openMessage(page, 'Lunch on Thursday?')).getByRole('link', { name: 'All their mail' }).click();
     await expect(page.getByRole('heading', { name: 'Ada Lovelace', level: 1 })).toBeVisible();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
     await path(page).toBe(senderPage('ada@example.org'));
     await query(page).toBe('');
 
     await page.goBack();
-    await expect(panelHeading(page, 'Lunch on Thursday?')).toBeVisible();
-    await panel(page).getByRole('button', { name: 'Close' }).click();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(readerHeading(page, 'Lunch on Thursday?')).toBeVisible();
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await path(page).toBe('/');
     await query(page).toBe('');
   });
@@ -275,8 +277,8 @@ test.describe('Who sent it is a link wherever it is named', () => {
     await sent.getByRole('link', { name: 'Ada Lovelace' }).click();
     await expect(page.getByRole('heading', { name: 'notifications@code.example.com', level: 1 })).toBeVisible();
     await expect(page.getByRole('combobox', { name: 'From' })).toContainText('Ada Lovelace');
-    await expect(rows(page, page.getByRole('table').nth(1))).toHaveCount(1);
-    await expect(panel(page)).toHaveCount(0);
+    await expect(rows(page, section(page, 'Their mail'))).toHaveCount(1);
+    await expect(reader(page)).toHaveCount(0);
 
     await page.goBack();
     await sent.getByRole('link', { name: 'notifications@code.example.com' }).click();
@@ -286,7 +288,7 @@ test.describe('Who sent it is a link wherever it is named', () => {
 
   test("a name on its sender's page narrows their mail to it", async ({ page }) => {
     await page.goto(SENDER);
-    await page.getByRole('table').first().getByRole('link', { name: 'Dependabot' }).click();
+    await section(page, 'Names').getByRole('link', { name: 'Dependabot' }).click();
     await expect(page.getByRole('combobox', { name: 'From' })).toContainText('Dependabot');
     await param(page, 'name').toBe('Dependabot');
   });
@@ -299,9 +301,9 @@ test.describe('Who sent it is a link wherever it is named', () => {
 
   test("the address in a message's header goes to the sender", async ({ page }) => {
     await page.goto(`/?${messageQuery('m6')}`);
-    await panel(page).getByRole('link', { name: 'ada@example.org' }).click();
+    await reader(page).getByRole('link', { name: 'ada@example.org' }).click();
     await expect(page.getByRole('heading', { name: 'Ada Lovelace', level: 1 })).toBeVisible();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
   });
 
   test("a rule's domain goes to the domain and its address to the sender, not to the rule", async ({ page }) => {
@@ -324,19 +326,17 @@ test.describe('Who sent it is a link wherever it is named', () => {
 });
 
 test.describe('A domain', () => {
-  test('shows what its mail is, who writes from it, and their mail', async ({ page }) => {
+  test('shows what its mail is, the people there, and their mail', async ({ page }) => {
     await page.goto(DOMAIN);
     await expect(page.getByRole('heading', { name: 'code.example.com', level: 1 })).toBeVisible();
     await expect(page.getByRole('row', { name: /^Notifications 5 · 71%/ })).toBeVisible();
     await expect(page.getByRole('row', { name: /^Account alerts 2 · 29%/ })).toBeVisible();
     await expect(
-      page
-        .getByRole('table')
-        .nth(1)
+      section(page, 'People here')
         .getByRole('row')
         .filter({ has: page.getByRole('link', { name: 'Dependabot' }) }),
     ).toContainText('notifications@code.example.com');
-    await expect(rows(page, page.getByRole('table').nth(2))).toHaveCount(8);
+    await expect(rows(page, section(page, 'Their mail'))).toHaveCount(8);
     for (const name of ['Trust', 'Unwanted', 'Block']) await expect(standing(page, 'code.example.com', name)).toHaveAttribute('aria-pressed', 'false');
   });
 
@@ -351,25 +351,32 @@ test.describe('A domain', () => {
 test.describe('On a phone', () => {
   test.use({ viewport: PHONE });
 
-  test("a rule's toast says Rule added above the rule, where after it the two would wrap apart", async ({ page }) => {
+  test("a rule's toast is one line: Rule added, then the rule, cut short before Undo", async ({ page }) => {
     await page.goto(SENDER);
     await standing(page, 'notifications@code.example.com', 'Block').click();
     const said = toast(page, 'Mail from notifications@code.example.com: send it to spam');
     const kind = await boxOf(said.getByText('Rule added', { exact: true }));
     const rule = await boxOf(said.getByText('Mail from notifications@code.example.com: send it to spam', { exact: true }));
-    expect(kind.y + kind.height / 2).toBeLessThan(rule.y);
+    const undo = await boxOf(said.getByRole('button', { name: /^Undo/ }));
+    expect(kind.x + kind.width).toBeLessThan(rule.x);
+    expect(rule.x + rule.width).toBeLessThanOrEqual(undo.x);
+    // One line: each is beside the other, not under it.
+    expect(kind.y).toBeLessThan(rule.y + rule.height);
+    expect(rule.y).toBeLessThan(kind.y + kind.height);
   });
 
-  test('a For review row opens its message over the whole screen, and Close returns to the list', async ({ page }) => {
+  test('a For review row opens its message in the list’s place, the width of the screen in its gutters, and Back returns to the list', async ({ page }) => {
     await page.goto('/');
     await page.getByRole('row').filter({ hasText: 'Lunch on Thursday?' }).click();
-    const open = panel(page);
-    await expect(panelHeading(page, 'Lunch on Thursday?')).toBeVisible();
-    expect((await boxOf(open)).width).toBeCloseTo(390, 0);
+    const open = reader(page);
+    await expect(readerHeading(page, 'Lunch on Thursday?')).toBeVisible();
+    const box = await boxOf(open);
+    expect(box.x).toBe(16);
+    expect(box.width).toBe(PHONE.width - 32);
     await sideScroll(page).toBe(0);
 
-    await open.getByRole('button', { name: 'Close' }).click();
-    await expect(panel(page)).toHaveCount(0);
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
   });
 
@@ -377,7 +384,7 @@ test.describe('On a phone', () => {
     await page.goto('/');
     await page.getByRole('row').filter({ hasText: 'Winter sale starts now' }).getByRole('link', { name: 'Store' }).click();
     await expect(page.getByRole('heading', { name: 'Store', level: 1 })).toBeVisible();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
     await path(page).toBe(senderPage('sale@store.example.com'));
     await param(page, 'message').toBeNull();
   });

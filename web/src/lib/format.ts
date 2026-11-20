@@ -142,6 +142,17 @@ export function duration(seconds: number): string {
   const rest = minutes % 60;
   return rest === 0 ? `${Math.floor(minutes / 60)} h` : `${Math.floor(minutes / 60)} h ${rest} min`;
 }
+/** Storage, to two figures: "250 MB", "3.1 GB". */
+export function size(bytes: number): string {
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let n = bytes / 1000;
+  let unit = 0;
+  while (n >= 1000 && unit < units.length - 1) {
+    n /= 1000;
+    unit++;
+  }
+  return `${n < 10 ? Number(n.toFixed(1)) : Math.round(n)} ${units[unit]}`;
+}
 /** A round amount on an axis, which may be under a cent: $0.025. */
 export const moneyTick = (usd: number) => (usd === 0 ? '$0' : `$${usd >= 0.1 ? usd.toFixed(2) : Number(usd.toPrecision(2))}`);
 
@@ -175,6 +186,15 @@ export function arrived(ms: number, now: number): string {
     undefined,
     at.getFullYear() === new Date(now).getFullYear() ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' },
   );
+}
+
+/** When a message in a conversation came: the time today, then the day and time, the year only when it is not this one. */
+export function heard(ms: number, now: number): string {
+  const at = new Date(ms);
+  const time = at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  if (daysBack(ms, now) <= 0) return time;
+  if (at.getFullYear() !== new Date(now).getFullYear()) return at.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  return `${at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, ${time}`;
 }
 
 export function ago(ms: number): string {
@@ -339,6 +359,21 @@ export const CONTACT_SAYS = {
   mutual: 'You have written to them',
   'one-way': 'They write often and you have never written back',
 } as const;
+
+/** How the owner and a sender know each other, as a filter names it. */
+export const CONTACT_FILTER = [
+  ['', 'Anyone'],
+  ['new', 'New'],
+  ['mutual', 'You write to them'],
+  ['one-way', 'Never written back'],
+] as const;
+
+/** A standing the owner gave: the press that gives it, and the state it leaves. */
+export const STANDINGS = [
+  ['trusted', 'Trust', 'Trusted'],
+  ['unwanted', 'Unwanted', 'Unwanted'],
+  ['blocked', 'Block', 'Blocked'],
+] as const;
 
 // Mail no tier could place is left in the inbox with Sift's own Gmail label: what Sift did there is ask.
 const DID: Record<string, string> = {

@@ -14,7 +14,7 @@ import { HELD, SEED, TEMPLATES, type Variant } from './sift.ts';
 export default async function setup() {
   await buildPage();
   const root = mkdtempSync(join(tmpdir(), 'sift-e2e-'));
-  const variants: Record<Variant, string[]> = { full: [], bare: ['--bare'], on: ['--on'], chatgpt: ['--chatgpt'] };
+  const variants: Record<Variant, string[]> = { full: [], bare: ['--bare'], on: ['--on'], chatgpt: ['--chatgpt'], inbox: ['--inbox'] };
   await Promise.all(
     Object.entries(variants).map(async ([name, args]) => {
       const dir = join(root, name);

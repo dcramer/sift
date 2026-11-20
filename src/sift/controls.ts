@@ -1,5 +1,6 @@
-import { undo } from '../actions/executor.ts';
+import { press, undo } from '../actions/executor.ts';
 import { removeRuleFilter, writeRuleFilter } from '../actions/rule-filters.ts';
+import { sendMail } from '../actions/send.ts';
 import type { Config } from '../config.ts';
 import { type Ephemeral, holding } from '../ephemeral/ephemeral.ts';
 import type { Controls } from '../dashboard/controls.ts';
@@ -8,10 +9,14 @@ import { REACH, modelShare } from '../store/inbox.ts';
 import { averageCall } from '../store/runs.ts';
 import { hasOwnLabels } from '../store/labels.ts';
 import { EXAMPLES as RULE_EXAMPLES, ruleInbox } from '../work/apply.ts';
+import { reachOf } from '../work/copy.ts';
+import { keptSize } from '../store/kept.ts';
+import { MAIL_WINDOWS } from '../mail-window.ts';
 import { createGmailApi } from '../gmail/api.ts';
 import { startEval } from '../learn/evals.ts';
 import { proposeLabels } from '../learn/labels.ts';
 import { draftRule } from '../learn/rules.ts';
+import { askMail } from '../learn/mail.ts';
 import { clientFor, loadClientSecrets, revokeGrant } from '../gmail/auth.ts';
 import { createGmailMailbox } from '../gmail/mailbox.ts';
 import { pacer } from '../gmail/quota.ts';
@@ -21,19 +26,30 @@ import { createJudge } from '../model/judge.ts';
 import { createHighlighter } from '../model/digest.ts';
 import { createProposer } from '../model/propose.ts';
 import { createRuleDrafter } from '../model/draft-rule.ts';
+import { createMailAsker } from '../model/ask.ts';
 import { type ChosenModel, modelChoices, offerModel, openModels, priceOf, resolveModel, saveApiKey, shortlistModels } from '../model/models.ts';
 import { listAccounts, personOf } from '../store/accounts.ts';
 import { getAction, lastStandingChange } from '../store/actions.ts';
+import { hashOf } from '../store/content.ts';
 import { credentials } from '../store/credentials.ts';
+import { recordLabels } from '../store/messages.ts';
 import { preferences } from '../store/preferences.ts';
 import type { Sql } from '../store/sql.ts';
 import { Refusal } from '../refusal.ts';
+import { reportError } from '../telemetry.ts';
 import type { StandIns } from './sift.ts';
 import { seal } from '../plain.ts';
 
 const DAY_MS = 86_400_000;
 /** How far back an estimate looks for how much mail went to the model: recent enough to reflect the rules as they are. */
 const ESTIMATE_DAYS = 30;
+/** What a message's text and HTML take to keep, in bytes, for someone whose own mail does not say yet: a guess. */
+const KEPT_GUESS = 30_000;
+/**
+ * How long a count only Gmail knows is kept: the settings, a rule's look at the inbox and setting up open with one, so a reload
+ * or a second look asks Gmail nothing for a while.
+ */
+const COUNT_MS = 5 * 60_000;
 
 /** A Gmail client for one of the person's mailboxes, with the sign-in kept in their database. */
 async function gmailClient(config: Config, db: Sql, email: string) {
@@ -92,6 +108,14 @@ export async function buildControls(
   /** Begin what is due for the person now, not at the next tick. */
   const passNow = async (db: Sql) => live.kick(await personOf(db));
   const { standIns } = live;
+  /** A count only Gmail knows, kept in `Ephemeral` for `COUNT_MS` under `key`, which names a mailbox by its number. */
+  const counted = async <T>(key: string, ask: () => Promise<T>): Promise<T> => {
+    const kept = await live.ephemeral.get<T>(key);
+    if (kept !== null) return kept;
+    const value = await ask();
+    await live.ephemeral.set(key, value, COUNT_MS);
+    return value;
+  };
   const gmail = async (db: Sql, email: string) => standIns?.gmail(email) ?? (await gmailFor(config, live.ephemeral, db, email));
   const chosen = async (db: Sql) => standIns?.model ?? (await openModel(config, live.ephemeral, db));
   /** The size of the person's own calls lately, in tokens, which is their mail and their labels more than the model; undefined for a typical call's. */
@@ -158,20 +182,60 @@ export async function buildControls(
       const action = await getAction(db, actionId);
       if (!action) throw new Refusal(`There is no change #${actionId}.`);
       const outcome = await undo({ db, mailbox: (await gmail(db, action.accountId)).mailbox }, actionId);
-      if (outcome.status === 'done') return null;
+      if (outcome.status === 'done') {
+        await recordLabels(db, action.accountId, action.messageId, outcome.finalLabels);
+        return null;
+      }
       if (outcome.status === 'skipped') return 'Already put back by hand';
       throw new Refusal(outcome.reason);
+    },
+    changeMail: async (db, accountId, messageIds, change) => {
+      const deps = { db, mailbox: (await gmail(db, accountId)).mailbox };
+      const landed: number[] = [];
+      let missed = 0;
+      for (const messageId of messageIds) {
+        try {
+          const { outcome, labels } = await press(deps, accountId, messageId, change);
+          if (labels) await recordLabels(db, accountId, messageId, labels);
+          if (outcome.status === 'done') landed.push(outcome.actionId);
+          else if (outcome.status !== 'skipped') missed++;
+        } catch (error) {
+          reportError(error);
+          missed++;
+        }
+      }
+      return { actions: landed, missed };
     },
     inboxEstimate: async (db, mailboxes, reach) => {
       let messages = 0;
       for (const account of await listAccounts(db)) {
         if (!mailboxes.includes(account.id) || !(await hasOwnLabels(db))) continue;
-        messages += Math.min(await (await gmail(db, account.id)).api.inboxSize(), REACH[reach]);
+        const size = await counted(`count:inbox:${account.number}`, async () => await (await gmail(db, account.id)).api.inboxSize());
+        messages += Math.min(size, REACH[reach]);
       }
       // As much of it as went to the model lately; with nothing to go by, all of it.
       const model = Math.round(messages * ((await modelShare(db, Date.now() - ESTIMATE_DAYS * DAY_MS)) ?? 1));
       const each = await costEach(db);
       return { messages, model, cost: each === null ? null : model * each };
+    },
+    mailReach: async (db, mailboxes) => {
+      const reach = {
+        year: { messages: 0, bytes: 0, minutes: 0 },
+        three_years: { messages: 0, bytes: 0, minutes: 0 },
+        all: { messages: 0, bytes: 0, minutes: 0 },
+      };
+      const each = (await keptSize(db)) ?? KEPT_GUESS;
+      for (const account of await listAccounts(db)) {
+        if (!mailboxes.includes(account.id) || !(await hasOwnLabels(db))) continue;
+        const mailbox = await counted(`count:reach:${account.number}`, async () => await reachOf((await gmail(db, account.id)).api, Date.now()));
+        for (const window of MAIL_WINDOWS) {
+          reach[window].messages += mailbox[window].messages;
+          reach[window].bytes += Math.round(mailbox[window].messages * each);
+          // Each mailbox has a quota of its own, and its copy a run of its own, so they go side by side.
+          reach[window].minutes = Math.max(reach[window].minutes, mailbox[window].minutes);
+        }
+      }
+      return reach;
     },
     putBack: async (db, accountId, messageId) => {
       const last = await lastStandingChange(db, accountId, messageId);
@@ -196,6 +260,11 @@ export async function buildControls(
       if (!opened) throw new Refusal('Choose a model first.');
       return seal(await draftRule({ db, draft: createRuleDrafter(opened.models, opened.model, opened.reasoning), model: opened.spec }, request));
     },
+    askMail: async (db, request) => {
+      const opened = await chosen(db);
+      if (!opened) throw new Refusal('Choose a model first.');
+      return seal(await askMail({ db, ask: createMailAsker(opened.models, opened.model, opened.reasoning), model: opened.spec }, request));
+    },
     ruleFilter: async (db, ruleId, on) => {
       // Every mailbox is tried, so one Gmail refusing does not leave the others as they were.
       let failed: unknown;
@@ -210,7 +279,11 @@ export async function buildControls(
     ruleInbox: async (db, ruleId) => {
       const samples = [];
       for (const account of await listAccounts(db)) {
-        const sample = await ruleInbox(db, (await gmail(db, account.id)).api, account.id, ruleId);
+        const { api } = await gmail(db, account.id);
+        // The search is the look's one call to Gmail once what it found is recorded; the query names senders, so its key is a keyed hash.
+        const searchInbox: typeof api.searchInbox = async (query) =>
+          await counted(`count:rule:${account.number}:${hashOf(db, query)}`, () => api.searchInbox(query));
+        const sample = await ruleInbox(db, { ...api, searchInbox }, account.id, ruleId);
         samples.push({ ...sample, examples: sample.examples.map((m) => ({ accountId: account.id, ...m, subject: seal(m.subject) })) });
       }
       const capped = samples.some((s) => s.most !== null);
@@ -232,6 +305,7 @@ export async function buildControls(
       const token = await (await credentials(db, 'gmail')).read(email).catch(() => undefined);
       return token === null || (token !== undefined && (await revokeGrant(token)));
     },
+    send: async (db, sending) => await sendMail({ db, mailbox: (await gmail(db, sending.accountId)).mailbox }, sending),
     checkNow: passNow,
     activity: async (mailboxes) => ({ running: true, ...(await passStatus(live.ephemeral, mailboxes)) }),
   };

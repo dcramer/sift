@@ -2,7 +2,7 @@
 /**
  * Verification scaffolding: fills an empty sift home with synthetic mail and prints a session cookie for it.
  *
- *   node .claude/skills/verify-sift/scripts/seed.ts <home> <gmail.json> [--bare | --on | --chatgpt]
+ *   node .claude/skills/verify-sift/scripts/seed.ts <home> <gmail.json> [--bare | --on | --chatgpt | --inbox]
  *
  * The mail goes through the real pass (`workDue`, with sift off), so decisions, labels, suggestion
  * bodies and proposals are what sift itself would record. Only Gmail is faked, at the `GmailApi` and
@@ -13,6 +13,10 @@
  * for the user with sift's Gmail label; the Store's last-day sale, archived as Marketing and then undone; and a third
  * widgets newsletter, archived as Newsletters by its rule, which stands.
  * `--chatgpt` has the model reached through a ChatGPT plan instead of an API key.
+ * `--inbox` has Inbox on before the passes, so they keep the text of the inbox's mail, and hands the fake Gmail each
+ * message's labels, so the reader's own presses there change it; elsewhere the fake Gmail holds none of the seed's mail. Its
+ * copy of the last year is part-way, 1,240 of about 8,240, until a pass is begun.
+ * Google lets Sift send from me@example.org, as itself or as `me+lists@example.org`, and not from the work mailbox.
  */
 import { createHmac, randomBytes } from 'node:crypto';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -25,9 +29,10 @@ import type { GmailApi, RawMessage } from '../../../../src/gmail/api.ts';
 import { saveApiKey } from '../../../../src/model/models.ts';
 import { credentials } from '../../../../src/store/credentials.ts';
 import { writeSecret } from '../../../../src/secrets.ts';
-import { connectAccount } from '../../../../src/store/accounts.ts';
+import { connectAccount, setCanSend, setMailboxAliases } from '../../../../src/store/accounts.ts';
 import { listLabels, removeLabel } from '../../../../src/store/labels.ts';
-import { setActive, setModel } from '../../../../src/store/preferences.ts';
+import { setActive, setMail, setModel } from '../../../../src/store/preferences.ts';
+import { advanceCopy, goingCopy, startCopies } from '../../../../src/store/copies.ts';
 import { lastStandingChange } from '../../../../src/store/actions.ts';
 import { undo } from '../../../../src/actions/executor.ts';
 import { listProposals } from '../../../../src/store/proposals.ts';
@@ -43,7 +48,7 @@ const WORK = 'me@work.example.org';
 const OTHER = 'bravo@example.net';
 
 const [home, gmailFile, variant] = process.argv.slice(2);
-if (!home || !gmailFile) throw new Error('usage: seed.ts <home> <gmail.json> [--bare | --on | --chatgpt]');
+if (!home || !gmailFile) throw new Error('usage: seed.ts <home> <gmail.json> [--bare | --on | --chatgpt | --inbox]');
 process.env['SIFT_HOME'] = resolve(home);
 const config = loadConfig();
 if (existsSync(config.databaseDir)) throw new Error(`${config.databaseDir} already exists. Seed an empty home.`);
@@ -85,7 +90,11 @@ const inbox = [
     ['CATEGORY_PROMOTIONS'],
   ),
   mail('CI <builds@ci.example.org>', 'Build failed on main', 'The build failed at step 3.'),
-  mail('Ada Lovelace <ada@example.org>', 'Lunch on Thursday?', 'Are you free for lunch on Thursday?', [{ name: 'In-Reply-To', value: '<lunch@example.org>' }]),
+  mail('Ada Lovelace <ada@example.org>', 'Lunch on Thursday?', 'Are you free for lunch on Thursday?', [
+    { name: 'Message-ID', value: '<thursday@example.org>' },
+    { name: 'In-Reply-To', value: '<lunch@example.org>' },
+    { name: 'References', value: '<lunch@example.org>' },
+  ]),
   // To everyone at the review, so the panel's Cc folds.
   mail('Grace Hopper <grace@example.net>', 'Notes from the review', 'Attached are my notes.', [
     { name: 'Cc', value: Array.from({ length: 12 }, (_, i) => `reviewer${i + 1}@example.net`).join(', ') },
@@ -96,9 +105,12 @@ const inbox = [
   mail('Ops <alerts@ops.example.com>', 'Disk 91% full on db-2', 'Free space is running low.'),
   mail('Ops <alerts@ops.example.com>', 'Replica lag on db-3', 'The replica is 40 seconds behind.'),
   // Kept below as Receipts, which that label archives, as moving them back to the inbox in Gmail answers; so Sift proposes keeping them.
-  mail('Utility <billing@utility.example.net>', 'Your March bill', 'Your bill is ready.'),
-  mail('Utility <billing@utility.example.net>', 'Your April bill', 'Your bill is ready.'),
-  mail('Utility <billing@utility.example.net>', 'Your May bill', 'Your bill is ready.'),
+  // One conversation, so Inbox has one to fold.
+  ...[
+    mail('Utility <billing@utility.example.net>', 'Your March bill', 'Your bill is ready.', [{ name: 'Message-ID', value: '<march@utility.example.net>' }]),
+    mail('Utility <billing@utility.example.net>', 'Your April bill', 'Your bill is ready.', [{ name: 'Message-ID', value: '<april@utility.example.net>' }]),
+    mail('Utility <billing@utility.example.net>', 'Your May bill', 'Your bill is ready.', [{ name: 'Message-ID', value: '<may@utility.example.net>' }]),
+  ].map((bill) => ({ ...bill, raw: { ...bill.raw, threadId: 'bills' } })),
   // One address under several names, which the stand-in model places by name, so For review folds them by name and
   // gives the address's page a list of names.
   ...(
@@ -160,6 +172,14 @@ const arrive = (mail: typeof inbox) => {
 };
 arrive(inbox);
 const find = (id: string) => inbox.find((m) => m.raw.id === id);
+// What a model's read of the whole message adds: Grace's notes come with a file, and the Deals mail is tracked.
+function contentOf(id: string) {
+  const m = find(id);
+  if (!m) return null;
+  const html = id === 'm4' ? { trackingPixel: true, trackedLinks: true, linkHosts: 2, linksOffDomain: true } : {};
+  return { text: m.body, html: HTML[id] ?? null, facts: { hasAttachments: id === 'm7', ...html } };
+}
+
 const api: GmailApi = {
   getProfile: async () => ({ emailAddress: ACCOUNT, historyId: String(history) }),
   listHistory: async (start) => ({
@@ -168,16 +188,18 @@ const api: GmailApi = {
   }),
   searchInbox: async () => ({ ids: [] }),
   inboxSize: async () => inbox.length,
+  searchMail: async () => ({ ids: [] }),
+  mailboxSize: async () => 0,
+  // With Inbox on, sync reads new mail whole once.
+  getMessage: async (id) => {
+    const m = find(id);
+    const read = contentOf(id);
+    return m && read ? { raw: m.raw, content: read } : null;
+  },
   getMetadata: async (id) => find(id)?.raw ?? null,
   getLabelIds: async (id) => mailbox.labels.get(id) ?? null,
   listLabels: async () => [],
-  // What a model's read of the whole message adds: Grace's notes come with a file, and the Deals mail is tracked.
-  getContent: async (id) => {
-    const m = find(id);
-    if (!m) return null;
-    const html = id === 'm4' ? { trackingPixel: true, trackedLinks: true, linkHosts: 2, linksOffDomain: true } : {};
-    return { text: m.body, html: HTML[id] ?? null, facts: { hasAttachments: id === 'm7', ...html } };
-  },
+  getContent: async (id) => contentOf(id),
   getThread: async () => null,
   listSendAs: async () => [ACCOUNT],
 };
@@ -198,6 +220,7 @@ const standIn = async () => ({
             : { label: 'notification', reason: 'synthetic: an automated notice', confidence: 0.95 }
           : { label: 'unsure', reason: 'synthetic: cannot tell', confidence: 0.3 },
 });
+if (variant === '--inbox') await setMail(db, true);
 // Four passes: three use up the Ops alerts' tries with the model, and the fourth leaves them to the user.
 const ephemeral = memoryEphemeral();
 for (let pass = 0; pass < 4; pass++) {
@@ -256,6 +279,14 @@ await writeRuleFilter({ db, mailbox, now: () => now - HOUR }, newsRule, ACCOUNT)
 // A second mailbox of the same person, with no mail (connected after the passes, so none comes to it), to remove; and a second person, who owns nothing yet and
 // takes over the install when the first deletes their account. Neither can be signed in to here.
 await connectAccount(store, WORK, '1', now - 23 * HOUR, user);
+if (variant === '--inbox') {
+  await setCanSend(db, ACCOUNT, true);
+  await setMailboxAliases(db, ACCOUNT, ['me+lists@example.org']);
+  // Copying the year part-way, as if Inbox had been turned on ten minutes ago with that much more in Gmail; the next pass begun finishes it.
+  await startCopies(db, [ACCOUNT], { since: now - 365 * 24 * HOUR, before: now - 10 * 60_000, now: now - 10 * 60_000 });
+  const copy = (await goingCopy(db, ACCOUNT))!;
+  await advanceCopy(db, copy, { listed: 1240, next: 'p2', estimate: 8240 }, now);
+}
 // `--bare` takes the person's labels out, as before they chose any, so every screen is the setting-up steps.
 if (variant === '--bare') for (const label of await listLabels(db)) if (label.id !== LEAVE_IN_INBOX) await removeLabel(db, label.id, now - 23 * HOUR);
 await connectAccount(store, OTHER, '1', now - 22 * HOUR);
@@ -271,7 +302,10 @@ if (variant === '--chatgpt') {
   await setModel(db, 'anthropic/claude-haiku-4-5');
 }
 await store.close();
-writeFileSync(gmailFile, JSON.stringify({ [ACCOUNT]: mailbox.filters }, null, 1));
+writeFileSync(
+  gmailFile,
+  JSON.stringify({ filters: { [ACCOUNT]: mailbox.filters }, labels: variant === '--inbox' ? { [ACCOUNT]: Object.fromEntries(mailbox.labels) } : {} }, null, 1),
+);
 
 // The same cookie `/auth/callback` sets (`signSession` in src/dashboard/server.ts), signed with this home's key.
 const secret = randomBytes(32).toString('base64url');

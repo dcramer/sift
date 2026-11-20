@@ -2,7 +2,10 @@
 import { Trash2Icon } from 'lucide-react';
 import { useState } from 'react';
 import { ErrorNote } from '@/components/bits.tsx';
-import { GoThroughInbox, InboxRow } from '@/components/inbox.tsx';
+import { GoThroughInbox, InboxRow, timeLeft } from '@/components/inbox.tsx';
+import { useNow } from '@/components/status.tsx';
+import { count } from '@/lib/format.ts';
+import { MailWindowDialog, TurnInboxOn, windowName } from '@/components/inbox-switch.tsx';
 import { ProviderList, providerName, useProviderConnect } from '@/components/model-connect.tsx';
 import { costLine, spentLine, subscription } from '@/lib/prices.ts';
 import { type ManageState, type Removed, api, useLoaded } from '@/lib/api.ts';
@@ -23,6 +26,7 @@ import {
   Select,
   SettingRow,
   SettingsGroup,
+  Share,
   Sheet,
   TextLink,
   setShortcutsOn,
@@ -100,6 +104,59 @@ function Active({ state, reload }: { state: ManageState; reload: () => void }) {
       </Sheet>
       <Failure>{error}</Failure>
       {goingThrough ? <GoThroughInbox model={state.model} onClose={() => setGoingThrough(false)} onStarted={reload} /> : null}
+    </SettingsGroup>
+  );
+}
+
+/** Inbox: reading and handling mail in Sift, with what Sift thinks of each message beside it. */
+function Mail({ state, reload }: { state: ManageState; reload: () => void }) {
+  const { busy, error, run } = useAction();
+  const [changing, setChanging] = useState(false);
+  const now = useNow(10_000);
+  const { copying } = state;
+  return (
+    <SettingsGroup title="Inbox" note="Read and handle your mail in Sift.">
+      <Sheet>
+        <SettingRow
+          title={state.mail ? 'On' : 'Off'}
+          note={
+            state.mail
+              ? 'Sift keeps a copy of your mail to show it here. Turning Inbox off deletes that copy.'
+              : 'Sift keeps the text only of mail waiting on you, and of the mail you answered for.'
+          }
+        >
+          {state.mail ? (
+            <Button busy={busy} onClick={() => run(() => api.setMail(false), reload)}>
+              Turn off
+            </Button>
+          ) : (
+            <TurnInboxOn label="Turn on" />
+          )}
+        </SettingRow>
+        {state.mail ? (
+          <SettingRow
+            title={copying ? `Copying ${windowName(state.mailWindow).toLowerCase()}` : windowName(state.mailWindow)}
+            note={
+              copying ? (
+                <div className="flex flex-col gap-2 pt-1">
+                  <Share part={copying.done} whole={Math.max(copying.total, copying.done)} />
+                  <span className="tabular-nums">
+                    {[`${count(copying.done)} of about ${count(Math.max(copying.total, copying.done))}`, now === null ? null : timeLeft(copying, now)]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </span>
+                </div>
+              ) : (
+                'Kept, and whatever is in your inbox however old.'
+              )
+            }
+          >
+            <Button onClick={() => setChanging(true)}>Change…</Button>
+          </SettingRow>
+        ) : null}
+      </Sheet>
+      <Failure>{error}</Failure>
+      {changing ? <MailWindowDialog current={state.mailWindow} onClose={() => setChanging(false)} onDone={reload} /> : null}
     </SettingsGroup>
   );
 }
@@ -508,6 +565,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           <>
             {/* Whether sift is on, the model and its sign-in are each person's own. */}
             <Active state={data} reload={reload} />
+            <Mail state={data} reload={reload} />
             <Model state={data} reload={reload} onConnect={onClose} />
             <Mailboxes state={data} signedInAs={signedInAs} reload={reload} />
             <Keys />

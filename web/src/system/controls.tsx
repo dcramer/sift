@@ -12,14 +12,14 @@ import { Kbd } from './type.tsx';
 export function ControlBar({ start, children, className }: { start?: ReactNode; children: ReactNode; className?: string }) {
   return (
     <div className={cn('flex items-center gap-x-3 text-muted-foreground', className)}>
-      {start ? <span className="px-2 text-sm whitespace-nowrap tabular-nums max-md:order-2">{start}</span> : null}
-      <div className="flex flex-1 items-center gap-1 max-md:contents md:justify-end">{children}</div>
+      {start ? <span className="px-2 text-sm whitespace-nowrap tabular-nums phone:order-2">{start}</span> : null}
+      <div className="flex flex-1 items-center gap-1 phone:contents md:justify-end">{children}</div>
     </div>
   );
 }
 
 const PRESS =
-  'press inline-flex h-(--control) shrink-0 cursor-pointer items-center gap-2 px-2 text-sm whitespace-nowrap hover:bg-(--fill) hover:text-foreground disabled:pointer-events-none disabled:opacity-35 max-md:h-11 max-md:flex-1 max-md:justify-center';
+  'press inline-flex h-(--control) shrink-0 cursor-pointer items-center gap-2 px-2 text-sm whitespace-nowrap hover:bg-(--fill) hover:text-foreground disabled:pointer-events-none disabled:opacity-35 phone:h-11 phone:flex-1 phone:justify-center';
 
 /**
  * One control: its keys, then what it does. Given `onPress` (or the props of a button) it can be pressed

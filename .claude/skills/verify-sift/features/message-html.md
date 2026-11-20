@@ -22,7 +22,7 @@ Preconditions:
 - **A link.** `ab snapshot -i` and click the frame's `Shop the sale` by its ref (`find role link` does not reach into the frame): `ab tab` lists a second tab at `https://shop.example.com/sale`; `ab tab close t2`. `Preferences` (a `javascript:` link in the source) is plain text, not a link.
 - **Text, remembered.** `ab find role radio click --name "Text"`: the frame and `Remote images are blocked` go, `Everything must go.` shows, and `ab eval "localStorage.getItem('sift:message-view')"` is `"text"`. `ab reload`: `Text` is still chosen. `ab find role radio click --name "HTML"` brings the frame back.
 - **Nothing to choose.** `?message=m6` and `ab open "$B/activity?show=all&message=m1"` have no `Read it as`; m1 says `Sift does not hold this message’s text.`
-- **Phone.** `ab set viewport 390 844`, open m4: the frame is the panel's width and `document.documentElement.scrollWidth - document.documentElement.clientWidth` is `0`. m4's card is wider than the frame and is cut off at its right edge (`ab screenshot`).
+- **Phone.** `ab set viewport 390 844`, open m4: the frame is the reader's width and `document.documentElement.scrollWidth - document.documentElement.clientWidth` is `0`. m4's card is wider than the frame and is cut off at its right edge (`ab screenshot`).
 
 ## Gotchas
 

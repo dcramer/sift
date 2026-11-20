@@ -152,9 +152,9 @@ describe('a Vercel instance of a project that is set up', () => {
     const { store, db } = await onePerson(ACCOUNT);
     deploy.store = store;
     await recordSync(db, ACCOUNT, [facts({ messageId: 'waiting', receivedAt: 0 })], '1', 0);
-    await raw(db).run(`INSERT INTO suggestion_bodies (account_id, message_id, body_text, fetched_at) VALUES (?, 'waiting', 'Old text.', 0)`, ACCOUNT);
+    await raw(db).run(`INSERT INTO read_bodies (account_id, message_id, body_text, fetched_at) VALUES (?, 'waiting', 'Old text.', 0)`, ACCOUNT);
     const { work } = await instance();
     await work({ kind: 'upkeep', person: db.person! });
-    expect(await raw(db).all('SELECT message_id FROM suggestion_bodies')).toEqual([]);
+    expect(await raw(db).all('SELECT message_id FROM read_bodies')).toEqual([]);
   });
 });

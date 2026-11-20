@@ -8,7 +8,7 @@ import { Wordmark } from './type.tsx';
  */
 export function Document({ title, updated, children }: { title: string; updated: string; children: ReactNode }) {
   return (
-    <article className="mx-auto flex w-full max-w-[42rem] flex-col gap-10 px-4 py-8 md:px-6 md:py-12">
+    <article className="mx-auto flex w-full max-w-[42rem] flex-col gap-10 px-4 pt-[calc(2rem+var(--safe-top))] pb-[calc(2rem+var(--safe-bottom))] md:px-6 md:pt-[calc(3rem+var(--safe-top))] md:pb-12">
       <Anchor href="/" className="self-start">
         <Wordmark />
       </Anchor>

@@ -63,6 +63,18 @@ describe('migrations', () => {
     expect(await generateMigration(last, generateDrizzleJson(schema, last.id)), 'run pnpm db:generate').toEqual([]);
   });
 
+  // Drizzle runs only what is dated after the newest a database has run, so a branch's migration dated before one
+  // that reached main first is skipped on every database main migrated. Renumber and re-date a branch's after main's.
+  it('are dated in the order they are numbered, one to a number', () => {
+    const journal = JSON.parse(readFileSync(new URL('meta/_journal.json', MIGRATIONS), 'utf8')) as { entries: { idx: number; tag: string; when: number }[] };
+    const files = readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql'));
+    expect(files.toSorted()).toEqual(journal.entries.map((e) => `${e.tag}.sql`));
+    journal.entries.forEach((entry, index) => {
+      expect(entry.tag.slice(0, 4)).toBe(String(index).padStart(4, '0'));
+      if (index > 0) expect(entry.when, entry.tag).toBeGreaterThan(journal.entries[index - 1]!.when);
+    });
+  });
+
   it('enforce what the schema says', async () => {
     const db = await openUserDb('acct');
     const insert = (id: string, disposition: Disposition) =>
@@ -308,6 +320,47 @@ describe('a message', () => {
       { user_id: 1, id: 'waiting', decided: false },
       { user_id: 2, id: 'decided', decided: true },
     ]);
+  });
+});
+
+describe('Inbox turned on before it copied all mail', () => {
+  it('starts copying a year of every mailbox of whoever has it on, by a migration, as a Postgres server runs it', async () => {
+    const { db, run } = await migratedBefore('0066_inbox_copies_mail_row_security');
+    await db.exec(`
+      INSERT INTO users (id, owner, created_at) VALUES (1, true, 0), (2, false, 0);
+      INSERT INTO accounts (id, user_id, created_at, "primary") VALUES ('a@example.org', 1, 0, true), ('a@work.example.com', 1, 1, false), ('b@example.net', 2, 2, true);
+      INSERT INTO mailboxes (user_id, id) VALUES (1, 'a@example.org'), (1, 'a@work.example.com'), (2, 'b@example.net');
+      INSERT INTO preferences (user_id, mail) VALUES (1, true), (2, false);
+    `);
+    await run('0066_inbox_copies_mail_row_security');
+    const rows = (
+      await db.query<{ user_id: number; account_id: string; year: boolean }>(
+        `SELECT user_id, account_id, before - since = 31536000000 AND finished_at IS NULL AS year FROM mail_copies ORDER BY account_id`,
+      )
+    ).rows;
+    expect(rows).toEqual([
+      { user_id: 1, account_id: 'a@example.org', year: true },
+      { user_id: 1, account_id: 'a@work.example.com', year: true },
+    ]);
+  });
+});
+
+describe('the text Sift read', () => {
+  it('kept while mail waited is kept as read text by a migration, as a Postgres server runs it, held to its person', async () => {
+    const { db, run } = await migratedBefore('0070_read_text_is_kept_thirty_days');
+    await db.exec(`
+      INSERT INTO users (id, owner, created_at) VALUES (1, true, 0);
+      INSERT INTO accounts (id, user_id, created_at, "primary") VALUES ('a@example.org', 1, 0, true);
+      INSERT INTO mailboxes (user_id, id) VALUES (1, 'a@example.org');
+      INSERT INTO messages (user_id, account_id, id, thread_id, sender_hash, domain_hash, received_at, headers, synced_at, facts) VALUES
+        (1, 'a@example.org', 'waiting', 't', 's', 'd', 0, 'h', 0, '{}');
+      INSERT INTO suggestion_bodies (user_id, account_id, message_id, body_text, fetched_at) VALUES (1, 'a@example.org', 'waiting', 'sealed', 5);
+    `);
+    await run('0070_read_text_is_kept_thirty_days');
+    expect((await db.query('SELECT user_id, message_id, body_text, fetched_at FROM read_bodies')).rows).toEqual([
+      { user_id: 1, message_id: 'waiting', body_text: 'sealed', fetched_at: 5 },
+    ]);
+    expect((await db.query(`SELECT relforcerowsecurity AS forced FROM pg_class WHERE relname = 'read_bodies'`)).rows).toEqual([{ forced: true }]);
   });
 });
 

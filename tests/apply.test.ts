@@ -114,9 +114,16 @@ describe('applying a rule to the inbox', () => {
     expect(searches).toEqual(['from:news.example.com']);
     expect(sample).toMatchObject({ messages: 2, reading: 0, exact: true, most: null });
     expect(sample.examples.map((m) => m.messageId)).toEqual(['seen', 'unseen']);
-    // Mail Sift has a record of is not fetched again.
+    // Mail Sift has a record of is not fetched again, and what it fetched it records, out of the triage queue, deciding nothing.
     expect(fetched.toSorted()).toEqual(['other', 'unseen', 'vip']);
-    expect(await raw(db).get(`SELECT count(*) AS n FROM messages WHERE id = 'unseen'`)).toEqual({ n: 0 });
+    expect(await raw(db).all(`SELECT id, decided FROM messages WHERE id IN ('unseen', 'vip', 'other') ORDER BY id`)).toEqual([
+      { id: 'other', decided: true },
+      { id: 'unseen', decided: true },
+      { id: 'vip', decided: true },
+    ]);
+    expect(await raw(db).get(`SELECT count(*) AS n FROM decisions WHERE message_id = 'unseen'`)).toEqual({ n: 0 });
+    expect(await ruleInbox(db, api, ACCOUNT, rule)).toEqual(sample);
+    expect(fetched).toHaveLength(3);
   });
 
   it("checks only the newest, and scales what they say to Gmail's guess at how many there are", async () => {

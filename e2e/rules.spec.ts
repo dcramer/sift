@@ -1,5 +1,5 @@
 import { addRule, fact, openRule, removeQuestion, removeRule, ruleDialog, ruleId, rulePanel, ruleRows, writeRule } from './rule.ts';
-import { expect, forReviewLink, panel, panelHeading, param, path, pointAt, query, row, test, throughChatGPT, toast, tooltip } from './sift.ts';
+import { back, expect, forReviewLink, reader, readerHeading, param, path, pointAt, query, row, test, throughChatGPT, toast, tooltip } from './sift.ts';
 
 test.describe('Rules', () => {
   test('a rule written by hand opens on its panel, and takes the mail it covers off For review', async ({ page }) => {
@@ -256,11 +256,11 @@ test.describe('Rules', () => {
     const rule = await ruleId(page);
 
     await opened.getByRole('cell', { name: 'Winter sale starts now' }).click();
-    const message = panel(page);
-    await expect(panelHeading(page, 'Winter sale starts now')).toBeVisible();
+    const message = reader(page);
+    await expect(readerHeading(page, 'Winter sale starts now')).toBeVisible();
     await param(page, 'message').toBe('m8');
 
-    await message.getByRole('button', { name: 'Close' }).click();
+    await back(page).click();
     await expect(message).toHaveCount(0);
     await expect(opened).toBeVisible();
     await path(page).toBe(`/rules/${rule}`);

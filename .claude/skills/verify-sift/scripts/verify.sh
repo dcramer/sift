@@ -2,8 +2,8 @@
 # Drives one disposable sift dashboard. Everything for a run lives in <dir>:
 #   home/       the sift home (seeded, synthetic)     removed by `down`
 #   evidence/   screenshots, snapshots, query output   kept by `down`
-#   pid port cookie dashboard.log gmail.json (the fake Gmail's filters)
-# Usage: verify.sh up <dir> [--bare | --on | --chatgpt] [--listing] | doctor <dir> | ab <dir> <agent-browser args...> | sql <dir> <query> | down <dir>
+#   pid port cookie dashboard.log gmail.json (the fake Gmail's filters, and with --inbox its messages' labels) sent.json (mail sent)
+# Usage: verify.sh up <dir> [--bare | --on | --chatgpt | --inbox] [--listing] | doctor <dir> | ab <dir> <agent-browser args...> | sql <dir> <query> | down <dir>
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -41,7 +41,7 @@ case "$cmd" in
     for flag in "${@:3}"; do
       case "$flag" in
         --listing) listing=--listing ;;
-        --bare | --on | --chatgpt) variant="$flag" ;;
+        --bare | --on | --chatgpt | --inbox) variant="$flag" ;;
         *) echo "up: unknown option $flag" >&2; exit 2 ;;
       esac
     done

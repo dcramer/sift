@@ -80,7 +80,7 @@ export function LayerContent({ title, subtitle, children }: { title: string; sub
   return (
     <>
       <div className="flex min-h-0 flex-1 flex-col max-lg:overflow-y-auto">
-        <header className={cn('pt-5 pb-4 pr-14 md:pr-16', GUTTER)}>
+        <header className={cn('pt-[calc(1.25rem+var(--layer-top,0px))] pb-4 pr-14 md:pr-16', GUTTER)}>
           <Base.Title className="title break-words">{title}</Base.Title>
           {subtitle ? <div className="mt-1 text-sm text-muted-foreground">{subtitle}</div> : null}
         </header>
@@ -89,7 +89,7 @@ export function LayerContent({ title, subtitle, children }: { title: string; sub
       <Base.Close
         aria-label="Close"
         aria-keyshortcuts="Escape"
-        className="press absolute top-[1.125rem] right-3 flex size-(--control) cursor-pointer items-center justify-center bg-(--surface) text-muted-foreground hover:bg-(--fill) hover:text-foreground md:right-4"
+        className="press absolute top-[calc(1.125rem+var(--layer-top,0px))] right-3 flex size-(--control) cursor-pointer items-center justify-center bg-(--surface) text-muted-foreground hover:bg-(--fill) hover:text-foreground md:right-4"
       >
         <XIcon className="size-4" />
       </Base.Close>

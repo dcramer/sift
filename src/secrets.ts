@@ -128,6 +128,25 @@ export function keyedHash(keys: Keyring, person: number, value: string): string 
   return createHmac('sha256', key).update(value).digest('base64url');
 }
 
+const searchKeys = new Map<string, Buffer>();
+/** Stands in for the key where there is none, as everything is then stored plain: the index says no more than the text beside it. */
+const NO_KEY = Buffer.alloc(32);
+
+/**
+ * A keyed hash of a word in one person's mail, for the bits it sets in that message's search index: HMAC-SHA256 under a
+ * key derived for this alone (HKDF, `sift-search:v1`) from the current key and the person, so it shares nothing with
+ * `keyedHash` and a new key moves every bit. 32 bytes.
+ */
+export function searchHash(keys: Keyring, person: number, term: string): Buffer {
+  const cached = `${keys.current?.id ?? ''} ${person}`;
+  let key = searchKeys.get(cached);
+  if (!key) {
+    key = keys.current ? Buffer.from(hkdfSync('sha256', keys.current.key, 'sift-search:v1', `person ${person}`, 32)) : NO_KEY;
+    searchKeys.set(cached, key);
+  }
+  return createHmac('sha256', key).update(term).digest();
+}
+
 /** How every value under the current key starts, for finding the ones that are not in a query. Null without a key. */
 export const currentPrefix = (keys: Keyring): string | null => (keys.current ? `${PREFIX}${keys.current.id}:` : null);
 

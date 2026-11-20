@@ -1,4 +1,4 @@
-import { type SQL, and, asc, decisions, desc, eq, lt, lte, max, messages, notExists, or, sql, suggestionBodies } from './query.ts';
+import { type SQL, and, asc, decisions, desc, eq, inArray, lte, max, messages, notExists, or, sql } from './query.ts';
 import { outOfTries } from './runs.ts';
 import type { Sql } from './sql.ts';
 import type { Facts, RuleFacts } from '../triage/facts.ts';
@@ -103,19 +103,31 @@ export async function storedFacts(db: Sql, accountId: string, messageId: string)
   return row ? openFacts(row.facts, plain(openEnvelope(db, accountId, messageId, { headers: row.headers }).headers)) : null;
 }
 
-/** Replace a message's recorded facts, once reading the whole message has added to them. */
+/** Add to a message's recorded facts what reading the whole message or its thread showed. What an earlier read showed stays. */
 export async function recordFacts(db: Sql, accountId: string, messageId: string, facts: Facts): Promise<void> {
   await db
     .update(messages)
-    .set({ facts: sealFacts(facts) })
+    .set({ facts: sql`${messages.facts} || ${JSON.stringify(sealFacts(facts))}::jsonb` })
     .where(and(eq(messages.accountId, accountId), eq(messages.id, messageId)));
 }
 
-/** The user applied `ruleId` to their inbox: once a model has said what this message is, what that rule decides is carried out. */
+/** The recorded messages of a thread, oldest first, with their labels: what Gmail's `threads.get` would say of those Sift has. */
+export async function recordedThread(db: Sql, accountId: string, threadId: string): Promise<{ id: string; labelIds: string[] }[]> {
+  return await db
+    .select({ id: messages.id, labelIds: messages.labelIds })
+    .from(messages)
+    .where(and(eq(messages.accountId, accountId), eq(messages.threadId, threadId)))
+    .orderBy(asc(messages.receivedAt), asc(messages.id));
+}
+
+/**
+ * The user applied `ruleId` to their inbox: once a model has said what this message is, what that rule decides is carried out.
+ * In the triage queue, where the model is asked, even if it was recorded out of it.
+ */
 export async function markApplying(db: Sql, accountId: string, messageId: string, ruleId: string): Promise<void> {
   await db
     .update(messages)
-    .set({ applyRule: ruleId })
+    .set({ applyRule: ruleId, decided: false })
     .where(and(eq(messages.accountId, accountId), eq(messages.id, messageId)));
 }
 
@@ -140,9 +152,44 @@ export async function latestArrival(db: Sql, accountId: string, now: number): Pr
   return row!.at;
 }
 
-/** Delete the text of waiting mail fetched before `cutoff`, every mailbox's. Returns how many went. */
-export async function purgeSuggestionBodies(db: Sql, cutoff: number): Promise<number> {
-  return (await db.delete(suggestionBodies).where(lt(suggestionBodies.fetchedAt, cutoff)).returning({ id: suggestionBodies.messageId })).length;
+/** Message ids are asked for this many at a time: one history can name thousands, such as a whole inbox archived in Gmail. */
+const IDS_AT_ONCE = 1000;
+
+/**
+ * Bring recorded messages' labels to what Gmail's history says, each change in history's order, so the last change to a
+ * label stands. Reading the same history again leaves the same labels, so a sync that fails before its cursor moves can.
+ */
+export async function followLabels(db: Sql, accountId: string, history: readonly { messageId: string; added: string[]; removed: string[] }[]): Promise<void> {
+  const byMessage = Map.groupBy(history, (change) => change.messageId);
+  const ids = [...byMessage.keys()];
+  for (let at = 0; at < ids.length; at += IDS_AT_ONCE) {
+    await db.transaction(async (tx) => {
+      const rows = await tx
+        .select({ id: messages.id, labelIds: messages.labelIds })
+        .from(messages)
+        .where(and(eq(messages.accountId, accountId), inArray(messages.id, ids.slice(at, at + IDS_AT_ONCE))));
+      for (const row of rows) {
+        const labels = new Set(row.labelIds);
+        for (const change of byMessage.get(row.id)!) {
+          for (const label of change.added) labels.add(label);
+          for (const label of change.removed) labels.delete(label);
+        }
+        if (labels.size === row.labelIds.length && row.labelIds.every((label) => labels.has(label))) continue;
+        await tx
+          .update(messages)
+          .set({ labelIds: [...labels] })
+          .where(and(eq(messages.accountId, accountId), eq(messages.id, row.id)));
+      }
+    });
+  }
+}
+
+/** A recorded message's labels as Gmail just gave them, so what lists the inbox is right before the next sync reads the change back. */
+export async function recordLabels(db: Sql, accountId: string, messageId: string, labelIds: readonly string[]): Promise<void> {
+  await db
+    .update(messages)
+    .set({ labelIds: [...labelIds] })
+    .where(and(eq(messages.accountId, accountId), eq(messages.id, messageId)));
 }
 
 /** Facts that hold a name or null: `true` or `false` against one asks whether there is a name. */

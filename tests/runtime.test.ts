@@ -19,7 +19,7 @@ import { ACCOUNT, FakeMailbox, codeSignIn, tempDir, testModel, workDue } from '.
  */
 const CACHES: Record<string, string[]> = {
   // Keys derived from SIFT_KEY.
-  'src/secrets.ts': ['derived', 'hashKeys'],
+  'src/secrets.ts': ['derived', 'hashKeys', 'searchKeys'],
   // Sift put together over the process's host, again by each copy of the module `next dev` loads.
   'src/sift/instance.ts': ['opened'],
 };
@@ -73,6 +73,9 @@ describe('a flow whose steps reach different instances', () => {
           listHistory: async () => ({ additions: [], historyId: '1' }),
           searchInbox: async (query) => (searched.push(query), { ids: [] }),
           inboxSize: async () => 0,
+          searchMail: async () => ({ ids: [] }),
+          mailboxSize: async () => 0,
+          getMessage: async () => null,
           getMetadata: async () => null,
           getLabelIds: async () => null,
           listLabels: async () => [],

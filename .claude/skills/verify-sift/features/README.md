@@ -32,6 +32,7 @@ An H1 and one paragraph of what the user gets, then four H2s in order: `Sub-feat
 
 ## Features
 
+- [Contacts](./contacts.md): everyone who writes, what Sift does with their next mail and where they stand, and each one's page.
 - [Agree with a suggestion](./agree-suggestion.md): press the check beside the label Sift gave a row.
 - [Answer a suggestion](./answer-suggestion.md): teach Sift what a waiting message is, and the rule that makes.
 - [Add a rule](./add-rule.md): a rule made on the Rules screen, and its effect on what is waiting.
@@ -39,7 +40,8 @@ An H1 and one paragraph of what the user gets, then four H2s in order: `Sub-feat
 - [A rule as a Gmail filter](./gmail-filter.md): whether a rule is a filter in Gmail, adding and removing one, and removing a rule that is one.
 - [Edit a label](./edit-label.md): change what a label does, add labels, suggested or by hand, and remove one.
 - [Setting up](./setting-up.md): the steps shown until a model is in use and the person has labels.
-- [Read a message as its HTML](./message-html.md): the Text and HTML choice in the message panel, and that nothing remote loads.
+- [Read a message as its HTML](./message-html.md): the Text and HTML choice in the reader, and that nothing remote loads.
 - [What Sift saw in a message](./message-facts.md): the facts shown on an opened message, rules on them, and lists narrowed by them.
 - [Remove a mailbox, delete the account](./remove-mailbox.md): what Sift holds about a mailbox, or a whole person, goes.
 - [Go through the inbox, apply a rule to it](./inbox-run.md): a run over mail already in the inbox, from Settings or a rule, and stopping it.
+- [Write and send mail](./compose.md): the composer, for new mail and replies, with Inbox on.

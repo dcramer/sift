@@ -43,8 +43,22 @@ export function Code({ children }: { children: ReactNode }) {
   return <code className="rounded-[2px] bg-foreground/8 px-[0.35em] py-[0.1em] font-mono text-[0.9em]">{children}</code>;
 }
 
-/** One thing about what it follows, as a small icon after it, said in words when pointed at. `look` is yellow. */
-export function Hint({ icon: Icon, says, tone = 'plain' }: { icon: LucideIcon; says: string; tone?: 'plain' | 'look' }) {
+/**
+ * One thing about what it follows, as a small icon after it, said in words when pointed at. `look` is yellow. `said`
+ * puts the words beside the icon instead, where they are the point (under a sender's name on their own page).
+ */
+export function Hint({ icon: Icon, says, tone = 'plain', said }: { icon: LucideIcon; says: string; tone?: 'plain' | 'look'; said?: boolean }) {
+  if (said)
+    return (
+      <span>
+        <Icon
+          aria-hidden
+          className={cn('mr-1.5 inline size-3.5 align-[-0.125em]', tone === 'look' ? 'text-highlight' : 'text-muted-foreground')}
+          strokeWidth={2.25}
+        />
+        {says}
+      </span>
+    );
   return (
     <Tooltip says={says} className={cn('inline-flex shrink-0', tone === 'look' ? 'text-highlight' : 'text-muted-foreground')}>
       <Icon aria-hidden className="size-3.5" strokeWidth={2.25} />

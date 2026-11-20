@@ -1,5 +1,7 @@
 import type { Sql } from '../store/sql.ts';
 import { outOfTries } from '../store/runs.ts';
+import { preferences } from '../store/preferences.ts';
+import { windowStart } from '../mail-window.ts';
 import {
   actions,
   and,
@@ -13,12 +15,13 @@ import {
   inArray,
   isNull,
   lt,
+  mailBodies,
   messages,
   modelRuns,
   not,
   or,
   sql,
-  suggestionBodies,
+  readBodies,
 } from '../store/query.ts';
 
 /**
@@ -42,26 +45,35 @@ export const PRUNE_PER_RUN = 5000;
  * - any decision, change or model call for it is newer than the cutoff, so a recent change can still be
  *   undone. A suggestion still waiting on the user is spared this long, and no longer.
  *
+ * While Inbox is on, it keeps the person's mail: what is in the inbox however old, and what was received within its window,
+ * whole, with everything Sift recorded about it. What falls outside goes as above. Mail Inbox recorded and Sift never
+ * triaged (`recordKept`) goes by when it was received alone, since nothing of triage depends on it.
+ *
  * Returns how many messages went. `PRUNE_PER_RUN` means there may be more.
  */
 export async function pruneOld(db: Sql, now: number = Date.now()): Promise<number> {
   const cutoff = now - RETENTION_DAYS * 86_400_000;
+  const { mail, mailWindow } = await preferences(db);
+  const kept = mail ? windowStart(mailWindow, now) : cutoff;
+  // Inbox on, keeping all of it.
+  if (kept === null) return 0;
   const decided = and(eq(decisions.accountId, messages.accountId), eq(decisions.messageId, messages.id));
+  const anyDecision = exists(
+    db
+      .select({ one: sql`1` })
+      .from(decisions)
+      .where(decided),
+  );
   const going = await db
     .select({ accountId: messages.accountId, id: messages.id })
     .from(messages)
     .where(
       and(
-        lt(messages.receivedAt, cutoff),
-        lt(messages.syncedAt, cutoff),
+        lt(messages.receivedAt, Math.min(kept, cutoff)),
+        mail ? not(sql`${messages.labelIds} @> '["INBOX"]'::jsonb`) : undefined,
         or(
-          exists(
-            db
-              .select({ one: sql`1` })
-              .from(decisions)
-              .where(decided),
-          ),
-          outOfTries(db, messages.accountId, messages.id),
+          and(lt(messages.syncedAt, cutoff), or(anyDecision, outOfTries(db, messages.accountId, messages.id))),
+          and(eq(messages.decided, true), not(anyDecision)),
         ),
         not(
           exists(
@@ -112,15 +124,18 @@ export async function pruneOld(db: Sql, now: number = Date.now()): Promise<numbe
   if (going.length === 0) return 0;
 
   await db.transaction(async (tx) => {
-    for (const m of going) {
-      const of = (t: typeof suggestionBodies | typeof actions | typeof decisions | typeof modelRuns) =>
-        and(eq(t.accountId, m.accountId), eq(t.messageId, m.id));
-      await tx.delete(suggestionBodies).where(of(suggestionBodies));
+    // A mailbox at a time, each table in one statement: a narrowed window can let go of many thousands at once.
+    for (const [accountId, rows] of Map.groupBy(going, (m) => m.accountId)) {
+      const ids = rows.map((m) => m.id);
+      const of = (t: typeof readBodies | typeof mailBodies | typeof actions | typeof decisions | typeof modelRuns) =>
+        and(eq(t.accountId, accountId), inArray(t.messageId, ids));
+      await tx.delete(readBodies).where(of(readBodies));
+      await tx.delete(mailBodies).where(of(mailBodies));
       await tx.delete(actions).where(of(actions));
       await tx.delete(feedback).where(inArray(feedback.decisionId, tx.select({ id: decisions.id }).from(decisions).where(of(decisions))));
       await tx.delete(decisions).where(of(decisions));
       await tx.delete(modelRuns).where(of(modelRuns));
-      await tx.delete(messages).where(and(eq(messages.accountId, m.accountId), eq(messages.id, m.id)));
+      await tx.delete(messages).where(and(eq(messages.accountId, accountId), inArray(messages.id, ids)));
     }
   });
   return going.length;

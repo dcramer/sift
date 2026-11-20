@@ -42,6 +42,8 @@ let inbox: RawMessage[];
 let logs: string[];
 let cursor: number;
 let bodies: Map<string, string>;
+/** Messages deleted for good, for the next history read. */
+let deleted: string[];
 
 /** A Gmail with whatever is in `inbox`; each history read hands the messages over once. */
 function api(): GmailApi {
@@ -49,10 +51,13 @@ function api(): GmailApi {
     getProfile: async () => ({ emailAddress: ACCOUNT, historyId: String(cursor) }),
     listHistory: async () => {
       const additions = inbox.map((m) => ({ id: m.id, labelIds: m.labelIds }));
-      return { additions, labelChanges: mailbox.history.splice(0), historyId: String(++cursor) };
+      return { additions, labelChanges: mailbox.history.splice(0), deleted: deleted.splice(0), historyId: String(++cursor) };
     },
     searchInbox: async () => ({ ids: [] }),
     inboxSize: async () => inbox.length,
+    searchMail: async () => ({ ids: [] }),
+    mailboxSize: async () => 0,
+    getMessage: async () => null,
     getMetadata: async (id) => inbox.find((m) => m.id === id) ?? null,
     getLabelIds: async (id) => mailbox.labels.get(id) ?? null,
     listLabels: async () => [...new Set([...mailbox.labels.values()].flat())].filter((id) => id.startsWith('L:')).map((id) => ({ id, name: id.slice(2) })),
@@ -85,6 +90,7 @@ beforeEach(async () => {
   logs = [];
   cursor = 1;
   bodies = new Map();
+  deleted = [];
   inbox = [message('news', 'News <news@example.com>'), message('ada', 'Ada <ada@example.org>')];
   for (const m of inbox) mailbox.labels.set(m.id, [...m.labelIds]);
 });
@@ -297,7 +303,7 @@ describe('a tick', () => {
     const limited: RunOptions = { ...options(), connect: () => ({ api: reading(), mailbox }), now: () => clock, model: slow };
     expect(await workDue(store, limited, 500)).toMatchObject([{ unfinished: true }]);
     expect(read).toEqual(['ada']);
-    expect(await raw(own).all('SELECT message_id, body_text FROM suggestion_bodies')).toEqual([{ message_id: 'ada', body_text: 'sift-plain:Body ada' }]);
+    expect(await raw(own).all('SELECT message_id, body_text FROM read_bodies')).toEqual([{ message_id: 'ada', body_text: 'sift-plain:Body ada' }]);
   });
 
   it('fetches the text of mail left waiting by an earlier pass while every pass runs out of time', async () => {
@@ -317,11 +323,11 @@ describe('a tick', () => {
     backlog('b2');
     expect(await workDue(store, limited, 500)).toMatchObject([{ unfinished: true }]);
     expect(await raw(own).all("SELECT message_id FROM decisions WHERE stage = 'rules'")).toEqual([{ message_id: 'news' }]);
-    expect(await raw(own).all("SELECT message_id FROM suggestion_bodies WHERE message_id = 'news'")).toEqual([]);
+    expect(await raw(own).all("SELECT message_id FROM read_bodies WHERE message_id = 'news'")).toEqual([]);
     backlog('b3');
     backlog('b4');
     expect(await workDue(store, limited, 500)).toMatchObject([{ unfinished: true }]);
-    expect(await raw(own).all("SELECT body_text FROM suggestion_bodies WHERE message_id = 'news'")).toEqual([{ body_text: 'sift-plain:Body news' }]);
+    expect(await raw(own).all("SELECT body_text FROM read_bodies WHERE message_id = 'news'")).toEqual([{ body_text: 'sift-plain:Body news' }]);
   });
 
   it('goes through an inbox it was asked to, until it is all done', async () => {
@@ -509,6 +515,7 @@ describe('teaching from Gmail', () => {
 
     mailbox.byUser('news', { add: ['INBOX'] });
     mailbox.labels.delete('news');
+    deleted.push('news');
     expect(await pass(true)).toBe(0);
     expect(await feedback()).toEqual([]);
   });

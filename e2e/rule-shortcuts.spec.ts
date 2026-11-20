@@ -1,5 +1,5 @@
 import { addRule, fact, makeRule, proposal, ruleDialog, rulePanel, seededRulesOnly, standing } from './rule.ts';
-import { domainPage, expect, messageQuery, panel, param, path, query, row, senderPage, test, toast } from './sift.ts';
+import { domainPage, expect, messageQuery, reader, param, path, query, row, senderPage, test, toast } from './sift.ts';
 
 /** The store's Winter sale starts now, open. */
 const STORE = `?${messageQuery('m8')}`;
@@ -62,7 +62,7 @@ test.describe('Rules from a shortcut', () => {
 
   test("a message's Make a rule… and Keep as… open over its panel, which closing the dialog leaves", async ({ page }) => {
     await page.goto(`/${STORE}`);
-    const message = panel(page);
+    const message = reader(page);
     const dialog = await makeRule(message);
     await expect(dialog.getByRole('textbox', { name: 'What should it do?' })).toHaveValue('Mail from sale@store.example.com is Marketing.');
     await dialog.getByRole('button', { name: 'Write it yourself' }).click();
@@ -85,7 +85,7 @@ test.describe('Rules from a shortcut', () => {
 
   test('a rule added from a message opens at its own address, and Back returns to the message', async ({ page }) => {
     await page.goto(`/${STORE}`);
-    const message = panel(page);
+    const message = reader(page);
     const dialog = await makeRule(message);
     await dialog.getByRole('button', { name: 'Write it yourself' }).click();
     await addRule(dialog);
@@ -102,7 +102,7 @@ test.describe('Rules from a shortcut', () => {
 
   test('a fact in a message starts the rule on it', async ({ page }) => {
     await page.goto(`/${STORE}`);
-    await panel(page).getByRole('button', { name: 'Make a rule for mail that came through a mailing list' }).click();
+    await reader(page).getByRole('button', { name: 'Make a rule for mail that came through a mailing list' }).click();
     const dialog = ruleDialog(page);
     await dialog.getByRole('button', { name: 'Write it yourself' }).click();
     await expect(dialog.getByRole('combobox', { name: 'Condition 1' })).toContainText('on the list');
@@ -110,7 +110,7 @@ test.describe('Rules from a shortcut', () => {
     await expect(dialog.getByRole('combobox', { name: 'What happens to it' })).toContainText('Archive');
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
-    await expect(panel(page)).toBeVisible();
+    await expect(reader(page)).toBeVisible();
   });
 
   test("a sender's standing is a rule given in one press: another replaces it, Undo gives the last back, and pressing it again takes it back", async ({
@@ -184,7 +184,7 @@ test.describe('Rules from a shortcut', () => {
     await dialog.getByRole('button', { name: 'Close' }).click();
     await expect(dialog).toHaveCount(0);
     await query(page).toBe('');
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
   });
 
   test("a domain's standing that is already a rule shows as pressed, and another replaces it in one press", async ({ page }) => {

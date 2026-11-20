@@ -3,7 +3,8 @@ import type { Mailbox } from '../actions/mailbox.ts';
 import type { GmailApi } from '../gmail/api.ts';
 import type { MessageContent } from '../gmail/body.ts';
 import { mailboxAliases } from '../store/accounts.ts';
-import { recordFacts } from '../store/messages.ts';
+import { recordFacts, recordedThread } from '../store/messages.ts';
+import { copied } from '../store/copies.ts';
 import { cachedCorrespondent, domainFacts, rememberCorrespondent, senderFacts } from '../store/senders.ts';
 import { answersUnderName } from '../store/examples.ts';
 import { type ThreadFacts, deriveFacts, threadFacts } from '../triage/facts.ts';
@@ -12,7 +13,7 @@ import type { MessageFacts } from '../triage/types.ts';
 
 export interface EvidenceSources {
   db: Sql;
-  /** For the message body. */
+  /** For the message body, read once (`readingOnce`), and a reply's thread when the record does not hold it. */
   api: Pick<GmailApi, 'getContent' | 'getThread'>;
   /** For "has the owner written to this sender". Only read from here. */
   mailbox: Pick<Mailbox, 'hasSentTo'>;
@@ -36,7 +37,7 @@ export async function gatherEvidence(sources: EvidenceSources, facts: MessageFac
   let thread: ThreadFacts | null = null;
   if (deriveFacts(facts).isReply) {
     try {
-      thread = threadFacts((await sources.api.getThread(facts.threadId)) ?? [], facts.messageId);
+      thread = await threadOf(sources, facts);
     } catch {
       thread = null;
     }
@@ -65,6 +66,21 @@ export async function gatherEvidence(sources: EvidenceSources, facts: MessageFac
       ? { domain: { messages: domain.messages, senders: domain.senders, standing: domain.standing, why: domain.why, ownerLabels: domain.answered } }
       : {}),
   };
+}
+
+/**
+ * What a reply's thread shows: as an earlier read found it (a model call tried again); from the record, which holds every
+ * message of it while Inbox has copied the mailbox, what the owner sent among them; and otherwise from Gmail, 40 units for the
+ * labels of the thread's other messages, which Sift may never have recorded.
+ */
+async function threadOf(sources: Pick<EvidenceSources, 'db' | 'api'>, facts: MessageFacts): Promise<ThreadFacts | null> {
+  const { known } = facts;
+  if (known?.earlierInThread !== undefined && known.ownerInThread !== undefined)
+    return { earlierInThread: known.earlierInThread, ownerInThread: known.ownerInThread };
+  const messages = (await copied(sources.db, facts.accountId))
+    ? await recordedThread(sources.db, facts.accountId, facts.threadId)
+    : await sources.api.getThread(facts.threadId);
+  return threadFacts(messages ?? [], facts.messageId);
 }
 
 /** Whether the owner has ever written to the sender: the cached answer, or one search of sent mail, remembered. Null if that failed. */

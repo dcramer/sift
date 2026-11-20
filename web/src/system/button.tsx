@@ -2,7 +2,7 @@
 import { type ComponentProps, type ReactNode, useId, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { Anchor } from './anchor.tsx';
-import { useShortcut } from './keys.tsx';
+import { ariaKeys, useShortcut } from './keys.tsx';
 import { Tooltip } from './tooltip.tsx';
 
 const BASE =
@@ -77,7 +77,7 @@ export function Button({ variant = 'plain', size = 'md', busy = false, shortcut,
   );
   if (rest.href !== undefined) {
     return (
-      <Anchor ref={element} className={classes} aria-busy={busy || undefined} {...(key ? { 'aria-keyshortcuts': key } : {})} {...rest}>
+      <Anchor ref={element} className={classes} aria-busy={busy || undefined} {...(key ? { 'aria-keyshortcuts': ariaKeys(key) } : {})} {...rest}>
         {content}
       </Anchor>
     );
@@ -92,7 +92,7 @@ export function Button({ variant = 'plain', size = 'md', busy = false, shortcut,
       disabled={disabled || busy}
       aria-busy={busy || undefined}
       {...(explained ? { 'aria-describedby': reason } : {})}
-      {...(key ? { 'aria-keyshortcuts': key } : {})}
+      {...(key ? { 'aria-keyshortcuts': ariaKeys(key) } : {})}
       {...button}
     >
       {content}
@@ -106,5 +106,20 @@ export function Button({ variant = 'plain', size = 'md', busy = false, shortcut,
         {why}
       </span>
     </Tooltip>
+  );
+}
+
+/**
+ * The `ink` press that finishes what is being written in a layer (the composer's Send): ⌘↵, or Ctrl ↵ off a Mac, presses it
+ * from anywhere in the layer, typing included, since the chord types nothing.
+ */
+export function Finish({
+  children,
+  ...rest
+}: Omit<Own, 'variant' | 'shortcut' | 'children'> & Omit<ComponentProps<'button'>, 'children'> & { children: string }) {
+  return (
+    <Button variant="ink" shortcut="Mod+Enter" {...rest}>
+      {children}
+    </Button>
   );
 }

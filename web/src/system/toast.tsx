@@ -34,7 +34,7 @@ export function Toaster({ children }: { children: ReactNode }) {
     <Base.Provider limit={3} timeout={0}>
       {children}
       <Base.Portal>
-        <Base.Viewport className="pointer-events-none fixed inset-x-4 bottom-[calc(var(--toasts-above,0px)+1rem)] z-[60] mb-[env(safe-area-inset-bottom)] flex flex-col-reverse items-center gap-2 outline-none md:inset-x-auto md:right-6 md:bottom-[calc(var(--toasts-above,0px)+1.5rem)] md:items-end">
+        <Base.Viewport className="pointer-events-none fixed inset-x-4 bottom-[calc(var(--toasts-above,0px)+1rem)] z-[60] mb-(--safe-bottom) flex flex-col-reverse items-center gap-2 outline-none md:inset-x-auto md:right-6 md:bottom-[calc(var(--toasts-above,0px)+1.5rem)] md:items-end">
           <Receipts />
         </Base.Viewport>
       </Base.Portal>
@@ -130,24 +130,42 @@ function Receipt({ toast, front, close }: { toast: Base.Root.ToastObject<Own>; f
       {...hold}
       className={cn(
         'sheet pointer-events-auto flex w-full flex-col bg-popover md:w-[26rem]',
+        // On a phone a receipt is one line, its kind and then its words, with its presses at the end, so it covers as little of the list as it can.
+        !failed && 'phone:flex-row phone:items-center',
         'transition-[opacity,translate] duration-150 ease-out data-ending-style:opacity-0 data-limited:hidden data-starting-style:translate-y-2 data-starting-style:opacity-0 motion-reduce:transition-none',
         failed && 'border-destructive bg-destructive text-background',
       )}
     >
-      <div className="flex items-start gap-2 p-1.5 pl-4">
-        <div className="flex min-h-(--control) min-w-0 grow flex-col justify-center gap-0.5 py-1">
-          <Base.Title render={<span />} className={cn('text-base leading-snug font-medium', failed && 'font-semibold')} />
-          <Base.Description render={<span />} className={cn('text-sm', kind && 'order-first', failed ? 'text-background/75' : 'text-muted-foreground')} />
+      {/* On a phone its words, its presses and then its close button share the one row. */}
+      <div className={cn('flex items-start gap-2 p-1.5 pl-4', !failed && 'phone:contents')}>
+        <div
+          className={cn(
+            'flex min-h-(--control) min-w-0 grow flex-col justify-center gap-0.5 py-1',
+            !failed && 'phone:flex-row phone:items-baseline phone:gap-2 phone:py-2.5 phone:pl-4',
+          )}
+        >
+          <Base.Title render={<span />} className={cn('text-base leading-snug font-medium', failed ? 'font-semibold' : 'phone:min-w-0 phone:truncate')} />
+          <Base.Description
+            render={<span />}
+            className={cn('text-sm', kind && 'order-first', failed ? 'text-background/75' : 'text-muted-foreground phone:shrink-0')}
+          />
         </div>
-        <Base.Close
+        {/* Not Base UI's Close, which is hidden from assistive technology unless a pointer is over the toasts. */}
+        <button
+          type="button"
           aria-label="Dismiss"
-          className={cn(PRESS, 'w-(--control) justify-center px-0', failed ? ON_RED : 'text-muted-foreground hover:text-foreground')}
+          onClick={() => close(toast.id)}
+          className={cn(
+            PRESS,
+            'w-(--control) justify-center px-0',
+            failed ? ON_RED : 'text-muted-foreground hover:text-foreground phone:order-last phone:mr-1.5',
+          )}
         >
           <XIcon className="size-4" />
-        </Base.Close>
+        </button>
       </div>
       {undo || action ? (
-        <div className="flex items-center justify-end gap-1 border-t border-(--rule) p-1.5">
+        <div className="flex shrink-0 items-center justify-end gap-1 border-t border-(--rule) p-1.5 phone:border-t-0 phone:pl-0">
           {action ? (
             <button type="button" className={cn(PRESS, 'text-foreground/75 hover:text-foreground')} onClick={action.onPress}>
               {action.label}

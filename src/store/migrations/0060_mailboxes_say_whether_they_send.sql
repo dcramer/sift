@@ -1,0 +1,1 @@
+ALTER TABLE "mailboxes" ADD COLUMN "can_send" boolean DEFAULT false NOT NULL;

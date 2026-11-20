@@ -4,7 +4,7 @@ import {
   boxOf,
   choose,
   expect,
-  panel,
+  reader,
   patchJson,
   query,
   reviewRows,
@@ -23,10 +23,10 @@ test.describe('For review', () => {
     await page.goto('/');
     await choose(row(page, 'Notes from the review'), 'Add a label…');
     await expect(addLabelsDialog(page)).toBeVisible();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
 
     await writeLabel(page, 'Field trips');
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
 
     // The new label is a choice at once.
@@ -46,7 +46,7 @@ test.describe('For review', () => {
     const dialog = addLabelsDialog(page);
     await dialog.getByRole('button', { name: 'Close' }).click();
     await expect(dialog).toHaveCount(0);
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
   });
 

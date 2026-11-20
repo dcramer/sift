@@ -4,7 +4,7 @@ How Sift keeps one person's mail from anyone else. Decided 2026-11-15 for Sift o
 
 ## Hold as little as possible
 
-Everything stored or sent anywhere (a column, a log line, telemetry, what the model provider is sent) has a reason, a lifetime and a form from the table below; anything without a reason goes. Message text and HTML are kept in two places only: mail the person answered for, until they delete it or for a year, and the text of mail waiting on them, until they answer it and for at most 30 days.
+Everything stored or sent anywhere (a column, a log line, telemetry, what the model provider is sent) has a reason, a lifetime and a form from the table below; anything without a reason goes. Message text and HTML are kept in three places only: mail the person answered for, until they delete it or for a year; what Sift read of a message, for 30 days from reading, so it is not read from Gmail again; and, while they have Inbox on, their mail within the window they chose.
 
 ## What is stored, and how
 
@@ -12,6 +12,7 @@ Everything stored or sent anywhere (a column, a log line, telemetry, what the mo
 | --- | --- | --- |
 | Message text and HTML, and its headers (sender, recipients, subject, list id) | Encrypted with the install's key, bound to the person, the mailbox, the message and the part | The server |
 | Credentials: Gmail refresh tokens, model sign-ins | Encrypted with the install's key, bound to the person and what each is for | The server, which uses them while the person is away |
+| The words of the mail Inbox keeps, for its search | A keyed Bloom filter per message, beside its text ([below](#the-search-index)) | The server; the database shows how alike two of one person's messages are, and nothing of which words |
 | Sender addresses and domains, in mail records and cached correspondents | A keyed hash per person, which finds and groups them. A record shows its sender from its encrypted headers; a cached correspondent is only its hash | The hash: nobody |
 | Rule and proposal conditions, a rule's name, a change's details (an unsubscribe's host, a filter's criteria), the filter written for a rule, a decision's reason, the person's words to the label and rule models and what those suggested, the reasons the model gave for what a digest says is worth a look | Encrypted; conditions are found by the keyed hash of them | The server |
 | What the person writes or Sift decides: labels, a rule's condition in their own words, actions, decisions and outcomes, times, costs | Plain | The server. Conditions and label descriptions are read on every pass, to be given to the model |
@@ -21,6 +22,19 @@ Everything stored or sent anywhere (a column, a log line, telemetry, what the mo
 **The install's key** is `SIFT_KEY`, in the environment, locally and on Vercel alike. It is never in the database or the repository.
 
 **Keyed hash** means an HMAC with a key derived for the person from the install's key (HKDF of the key and the person's id; `keyedHash` in `src/secrets.ts`). Addresses are lowercased first. A plain hash would not do: addresses are guessable, and a list of them could be hashed and matched. With a key per person the same sender hashes differently for each person, so the database does not show that two people hear from the same sender. The database can only ask whether two are equal: a sender's page, "all mail from this sender" and "the rule with exactly these conditions" look up by hash, and anything else (search, sorting by address) decrypts in Sift. A new key changes every hash, so Sift hashes again what it encrypts again: at start under `sift run`, and in the build on Vercel. Without a key, the hash is the value itself.
+
+## The search index
+
+Inbox's search cannot ask Postgres about text it holds encrypted, so each message whose text Inbox keeps also has a Bloom filter of its words, its sender's and its subject's, and their starts ([inbox.md](inbox.md#search)): a few hundred bytes to 4 KB in which each term sets 7 bits named by an HMAC under a key derived for search alone (HKDF of the install's key and the person's id, `sift-search:v1`; `searchHash` in `src/secrets.ts`), apart from the keyed hash's. It is chosen over a table of keyed hashes of each word, which would be about 30 times larger (a row for each word and start of a word of each message, some 50 million for 100,000 messages) and would show which messages share each word, so that how often each one comes up (the commonest are "the" and "to") names it.
+
+What someone holding the database without the key learns from it:
+
+- **How many different words a message has**, roughly, from its size (a power of two) and how many of its bits are set. Its encrypted text's length says as much already.
+- **How alike two of one person's messages are.** A word sets the same bits in all of that person's mail, so two messages that share many words share many bits: mail from the same newsletter, or a thread's replies, can be grouped. Which bits are which word cannot be worked out without the key, and each bit is set by thousands of words.
+- **Which of their messages may hold a word they planted.** Someone who can both send the person mail and read the database can send a message of a single unusual word, find its index, and look for its bits in the rest, with about one in a few hundred false matches per word. This is the index's real cost: the same person could not tell that from the text, which no key opens to them. Each message's own salt would end it, but then a search would have to read every message's index into Sift and hash each word for each one, seconds a search for a large mailbox, instead of one query in Postgres.
+- **Nothing across people.** The key is the person's, so the same word sets different bits in someone else's mail.
+
+Who can search: only the server with the key, through the person's own handle, like every other read of their mail. A new key moves every bit, so an index read before a rotation tells nothing about the one after it.
 
 ## Not end to end
 

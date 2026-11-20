@@ -4,7 +4,7 @@ import { Clause, Document, TextLink } from '@/system';
 // their own Google client. Until it has an address of its own, people reach it through the repository. Google's verification reads these pages: the Limited Use
 // statement must stay word for word, and what they say sift keeps must stay true of the code. The security
 // page is held to docs/security.md and AGENTS.md's safety rules the same way.
-const UPDATED = 'November 17, 2026';
+const UPDATED = 'November 19, 2026';
 const SOURCE = 'https://github.com/dcramer/sift';
 const USER_DATA_POLICY = 'https://developers.google.com/terms/api-services-user-data-policy';
 const PERMISSIONS = 'https://myaccount.google.com/permissions';
@@ -27,14 +27,15 @@ export function PrivacyView() {
             <li>Your Google account’s email address, when you sign in.</li>
             <li>
               Your Gmail, through two permissions. <strong>gmail.modify</strong> lets it read messages and their labels, label them, archive them and mark them
-              as spam. <strong>gmail.settings.basic</strong> lets it add and remove Gmail filters for the rules you ask it to copy into Gmail. Sift does not ask
-              to send mail, and it never deletes or trashes it.
+              as spam. <strong>gmail.settings.basic</strong> lets it add and remove Gmail filters for the rules you ask it to copy into Gmail. Only if you turn
+              on Inbox and allow it, <strong>gmail.send</strong> lets it send mail you write in the dashboard and press Send on. It never sends anything by
+              itself, and it never deletes or trashes mail.
             </li>
             <li>
               For each message in your inbox: its headers (sender, recipients, subject, date, the sender’s authentication results, mailing list and unsubscribe
               headers) and its Gmail labels.
             </li>
-            <li>Its body, only when a model is about to judge it, while it waits for your answer, and once you have answered for it.</li>
+            <li>Its body, once, only when a model is about to judge it, it waits for your answer, or you answer for it.</li>
             <li>
               Whether you have written to a sender, and for a reply, whether you wrote earlier in the thread. No other message’s content is read for this.
             </li>
@@ -46,7 +47,7 @@ export function PrivacyView() {
             <li>A record of every message it reads: the facts from its headers and its subject, not its body.</li>
             <li>Every decision it made and every change it made to your mailbox, so you can see why and undo it.</li>
             <li>Your labels, rules and answers.</li>
-            <li>The text of mail waiting for your answer. It is deleted when you answer, when the message stops waiting, and after 30 days in any case.</li>
+            <li>The text of each message whose body it read, for 30 days from reading it, so it never has to read it again.</li>
             <li>
               The text of each message you answered for, kept as an example that teaches Sift your preferences, until you delete it in the dashboard or the
               period we set for examples ends.
@@ -145,8 +146,9 @@ export function TermsView() {
             but the messages you answer for in the dashboard.
           </p>
           <p>
-            When it acts, it only labels, archives, marks as read or as spam, and unsubscribes, and only mail still in your inbox. It never sends, replies,
-            forwards or deletes. Each change is recorded, and you can undo it from the dashboard.
+            When it acts, it only labels, archives, marks as read or as spam, and unsubscribes, and only mail still in your inbox. It never forwards or deletes,
+            and never sends or replies by itself: it sends only mail you write and press Send on, with Inbox on. Each change is recorded, and you can undo it
+            from the dashboard; mail sent cannot be taken back.
           </p>
         </Clause>
 
@@ -205,10 +207,10 @@ export function SecurityView() {
 
         <Clause title="What Sift can do to your mail">
           <ul>
-            <li>It asks Google only to read and label mail and to manage filters. It never deletes or trashes mail.</li>
+            <li>It asks Google to read and label mail and to manage filters. It never deletes or trashes mail.</li>
             <li>
-              Today it cannot send mail at all. If Sift ever sends, such as a daily digest to your own address or forwarding that a rule of yours asks for,
-              Google will ask you to allow it first, and it will send only what you set up.
+              It sends mail only if you turn on Inbox and Google asks you to allow it, and then only mail you write in the dashboard and press Send on. It never
+              sends anything by itself, and the model that reads your mail cannot send.
             </li>
             <li>Until you turn it on, it changes nothing in Gmail but the messages you answer for yourself.</li>
             <li>

@@ -10,7 +10,9 @@ import { freshStore, googleSignIn, raw, rowsBy, startDashboard } from './fixture
 import { recordDecision } from '../src/store/decisions.ts';
 import { addRule, listRules } from '../src/store/rules.ts';
 import { codeSignIn, facts, withSampleLabels } from './helpers.ts';
-import { conditionsHash } from '../src/store/content.ts';
+import { conditionsHash, sealPart } from '../src/store/content.ts';
+import { mailBodies } from '../src/store/query.ts';
+import { searchIndex } from '../src/store/search.ts';
 import { startEval } from '../src/learn/evals.ts';
 import { startInboxRuns } from '../src/store/inbox.ts';
 import * as api from '../src/dashboard/api/index.ts';
@@ -69,11 +71,30 @@ async function seed(account: string): Promise<void> {
     `Body ${mark}`,
     `<p>Html ${mark}</p>`,
   );
+  // Inbox's text, indexed, so a search for the mark finds it in its own mailbox.
+  await db.insert(mailBodies).values({
+    accountId: account,
+    messageId: `m-${mark}`,
+    bodyText: sealPart(db, account, `m-${mark}`, 'text', `Text ${mark}`)!,
+    bodyHtml: sealPart(db, account, `m-${mark}`, 'html', `<p>Html ${mark}</p>`),
+    search: searchIndex(db, { text: `Text ${mark}`, fromName: null, fromAddress: sender.address, subject: `Subject ${mark}` }),
+    fetchedAt: 1000,
+  });
   const run = await startEval({ db, model: `model/${mark}` }, { accountId: account, fewShot: false });
   // Finished, so the next mailbox in the same database can start one.
   await raw(db).run(`UPDATE eval_runs SET status = 'done', finished_at = 1000 WHERE id = ?`, run);
   ids[account] = { rule, action, proposal, run };
 }
+
+/** Mail written from one mailbox, as the page sends it. */
+const mail = (accountId: string) => ({
+  accountId,
+  id: '<a1@example.org>',
+  from: { address: accountId },
+  to: [{ address: 'x@example.com' }],
+  cc: [],
+  text: 'Hello',
+});
 
 const call = (method: 'GET' | 'POST', path: string, who: string | null, body?: unknown) => {
   if (who) called.add(new URL(path, 'http://sift').pathname);
@@ -100,6 +121,7 @@ beforeEach(async () => {
     saveModelKey: async (db, provider) => void calls.push(`key ${provider} ${await personOf(db)}`),
     signOutModel: async (db, provider) => void calls.push(`signout ${provider} ${await personOf(db)}`),
     undo: async (_db, id) => (calls.push(`undo ${id}`), 'undone'),
+    changeMail: async (_db, accountId, messageIds, change) => (calls.push(`${change} ${accountId} ${messageIds.join(',')}`), { actions: [1], missed: 0 }),
     putBack: async () => {},
     ruleFilter: async (_db, id) => void calls.push(`filter ${id}`),
     // Answers with the mail of whoever has the rule: only the route's own check keeps it from someone else.
@@ -117,11 +139,18 @@ beforeEach(async () => {
     },
     // Reads Gmail for whichever mailboxes it is given: only the route's scope keeps it to the asker's.
     inboxEstimate: async (_db, mailboxes) => (calls.push(`estimate ${mailboxes.join(',')}`), { messages: 1, model: 1, cost: null }),
+    mailReach: async (_db, mailboxes) => {
+      calls.push(`reach ${mailboxes.join(',')}`);
+      const each = { messages: 1, bytes: 1, minutes: 1 };
+      return { year: each, three_years: each, all: each };
+    },
     startEval: async (_db, { accountId }) => (calls.push(`eval ${accountId}`), 1),
     proposeLabels: async (_db, { accountId, goal }) => (calls.push(`propose ${accountId}`), { id: 1, goal: seal(goal), drafts: [], at: 0 }),
     draftRule: async (_db, { accountId }) => (calls.push(`draft ${accountId}`), seal({ match: { from: ['x@example.com'] }, disposition: 'archive' as const })),
+    askMail: async (_db, { accountId }) => (calls.push(`ask ${accountId}`), seal({ cannot: 'No.' })),
     revokeGmail: async (_db, email) => (calls.push(`revoke ${email}`), !unreachable.includes(email)),
     // Whatever is asked for, it would answer with that person's mail: only the route's own check keeps it from the wrong person.
+    send: async (_db, { accountId, threadId }) => (calls.push(`send ${accountId} ${threadId}`), { id: 's', threadId: threadId ?? 's' }),
     checkNow: async () => void calls.push('check'),
     activity: async () => ({
       running: true,
@@ -152,6 +181,8 @@ const READS = (account: string, mark: string) => [
   '/api/labels/proposal',
   `/api/message?id=m-${mark}`,
   `/api/suggestion?sender=sender@${mark}.example.com`,
+  '/api/contacts',
+  `/api/contacts?q=${mark}`,
   `/api/sender?address=sender@${mark}.example.com`,
   `/api/domain?domain=${mark}.example.com`,
   `/api/examples?mailbox=${encodeURIComponent(account)}`,
@@ -160,6 +191,10 @@ const READS = (account: string, mark: string) => [
   `/api/rules/usage?id=${ids[account]!.rule}`,
   `/api/rules/inbox?id=${ids[account]!.rule}`,
   '/api/inbox?reach=inbox',
+  '/api/mail/threads',
+  `/api/mail/threads?q=${mark}&view=needs&unread=1`,
+  `/api/mail/threads?from=sender@${mark}.example.com&domain=${mark}.example.com&since=0`,
+  `/api/mail/thread?thread=t1&mailbox=${encodeURIComponent(account)}`,
 ];
 
 describe('users and their mailboxes', () => {
@@ -300,6 +335,15 @@ describe("nobody sees or changes another person's mail", () => {
       ['/api/evals/run', { accountId: ALPHA }, { accountId: NOBODY }],
       ['/api/mailbox/remove', { address: ALPHA }, { address: NOBODY }],
       ['/api/mailbox/primary', { address: ALPHA }, { address: NOBODY }],
+      [
+        '/api/mail/change',
+        { accountId: ALPHA, messageIds: [`m-${MARK[ALPHA]}`], change: 'archive' },
+        { accountId: NOBODY, messageIds: [`m-${MARK[ALPHA]}`], change: 'archive' },
+      ],
+
+      ['/api/mail/send', { ...mail(ALPHA), subject: 'Hi' }, { ...mail(NOBODY), subject: 'Hi' }],
+      // From their own mailbox, answering someone else's message.
+      ['/api/mail/send', { ...mail(BRAVO), replyTo: { messageId: `m-${MARK[ALPHA]}` } }, { ...mail(BRAVO), replyTo: { messageId: 'm-nobody' } }],
     ];
     for (const [path, body, nobody] of writes) {
       const answer = await call('POST', path, BRAVO, body);
@@ -322,12 +366,19 @@ describe("nobody sees or changes another person's mail", () => {
     expect((await call('POST', '/api/rules', ALPHA, fromProposal)).status).toBe(200);
     expect(await raw(db).get('SELECT status FROM proposals WHERE id = ?', theirs.proposal)).toEqual({ status: 'accepted' });
     expect((await call('POST', '/api/undo', ALPHA_WORK, { id: theirs.action })).status).toBe(200);
+    expect((await call('POST', '/api/mail/change', ALPHA_WORK, { accountId: ALPHA, messageIds: [`m-${MARK[ALPHA]}`], change: 'read' })).status).toBe(200);
+    expect(calls.at(-1)).toBe(`read ${ALPHA} m-${MARK[ALPHA]}`);
+
+    calls = [];
+    expect((await call('POST', '/api/mail/send', ALPHA, { ...mail(ALPHA_WORK), replyTo: { messageId: `m-${MARK[ALPHA_WORK]}` } })).status).toBe(200);
+    expect(calls).toEqual([`send ${ALPHA_WORK} t1`]);
   });
 
   it('lets each person change their own mode, model and sign-ins, and only their own', async () => {
     const bravo = (await userOf(store.central, BRAVO))!.id;
     for (const [path, body] of [
       ['/api/active', { active: true }],
+      ['/api/mail/on', { on: true, window: 'all' }],
       ['/api/model', { model: 'openai/small' }],
       ['/api/model/reasoning', { reasoning: 'high' }],
       ['/api/model/chatgpt', {}],
@@ -335,11 +386,21 @@ describe("nobody sees or changes another person's mail", () => {
       ['/api/model/key', { provider: 'openai', key: 'k' }],
       ['/api/model/signout', { provider: 'openai' }],
       ['/api/digest', { hour: 6, timeZone: 'Europe/Berlin' }],
+      // Inbox is on now: Ask looks up only their own senders, under their own mailbox.
+      ['/api/mail/ask', { words: 'from alpha', today: '2026-11-19' }],
     ] as const)
       expect((await call('POST', path, BRAVO, body)).status, path).toBe(200);
-    expect(calls.filter((c) => c !== 'check')).toEqual([`chatgpt ${bravo}`, `finish ${bravo}`, `key openai ${bravo}`, `signout openai ${bravo}`]);
+    expect(calls.filter((c) => c !== 'check')).toEqual([
+      `chatgpt ${bravo}`,
+      `finish ${bravo}`,
+      `key openai ${bravo}`,
+      `signout openai ${bravo}`,
+      `ask ${BRAVO}`,
+    ]);
     expect(await preferences(await dbOf(BRAVO))).toMatchObject({
       active: true,
+      mail: true,
+      mailWindow: 'all',
       model: 'openai/small',
       reasoning: 'high',
       digestHour: 6,
@@ -347,13 +408,17 @@ describe("nobody sees or changes another person's mail", () => {
     });
     expect(await preferences(await dbOf(ALPHA))).toMatchObject({
       active: false,
+      mail: false,
       model: 'alpha-own-words/model',
       reasoning: 'low',
       digestHour: 7,
       timeZone: null,
     });
-    expect((await call('GET', '/api/manage', BRAVO)).body).toMatchObject({ active: true, digest: { hour: 6, timeZone: 'Europe/Berlin' } });
-    expect((await call('GET', '/api/manage', ALPHA)).body).toMatchObject({ active: false, digest: { hour: 7, timeZone: null } });
+    expect((await call('GET', '/api/manage', BRAVO)).body).toMatchObject({ active: true, mail: true, digest: { hour: 6, timeZone: 'Europe/Berlin' } });
+    expect((await call('GET', '/api/manage', ALPHA)).body).toMatchObject({ active: false, mail: false, digest: { hour: 7, timeZone: null } });
+    // Copying Bravo's mail began in Bravo's mailbox alone.
+    expect(await raw(await dbOf(ALPHA)).all('SELECT account_id FROM mail_copies')).toEqual([]);
+    expect(await raw(await dbOf(BRAVO)).all('SELECT account_id FROM mail_copies')).toEqual([{ account_id: BRAVO }]);
     expect((await call('POST', '/api/model', null, { model: 'nobody/model' })).status).toBe(401);
   });
 
@@ -392,6 +457,9 @@ describe("nobody sees or changes another person's mail", () => {
   it("goes through only the asker's own inboxes, and stops only theirs", async () => {
     expect((await call('GET', '/api/inbox?reach=inbox', ALPHA_WORK)).status).toBe(200);
     expect(calls).toEqual([`estimate ${ALPHA},${ALPHA_WORK}`]);
+    expect((await call('GET', '/api/mail/reach', ALPHA_WORK)).status).toBe(200);
+    expect(calls.at(-1)).toBe(`reach ${ALPHA},${ALPHA_WORK}`);
+    calls = [];
     expect((await call('POST', '/api/inbox/start', ALPHA, { reach: 'recent' })).status).toBe(200);
     expect(
       (await raw(await dbOf(ALPHA)).all<{ account_id: string }>('SELECT account_id FROM inbox_runs ORDER BY account_id')).map((r) => r.account_id),

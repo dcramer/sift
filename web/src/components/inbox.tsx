@@ -74,7 +74,7 @@ export function GoThroughInbox({ model, onClose, onStarted }: { model: ManageSta
 }
 
 /** Roughly how long the rest will take, from how fast it has gone so far. */
-function timeLeft(going: NonNullable<ManageState['inbox']['going']>, now: number): string | null {
+export function timeLeft(going: { done: number; total: number; startedAt: number }, now: number): string | null {
   const elapsed = now - going.startedAt;
   if (going.done === 0 || elapsed <= 0) return null;
   const minutes = Math.round(((going.total - going.done) * (elapsed / going.done)) / 60_000);

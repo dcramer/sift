@@ -12,6 +12,7 @@ import { RULE_FACTS, type RuleFacts as Conditions, factCondition } from '../tria
 import { GIVEN } from '../triage/standing.ts';
 import { DRAFT_ACTIONS } from '../triage/proposal.ts';
 import { REASONING } from '../model/reasoning.ts';
+import { MAIL_WINDOWS } from '../mail-window.ts';
 import { DECIDED } from '../triage/types.ts';
 
 export const STAGES = ['rules', 'classifier', 'model', 'fallback'] as const;
@@ -311,7 +312,14 @@ export const MessageDetail = z.object({
   unsubscribe: z.enum(['available', 'done', 'manual', 'none']),
   /** Every decision made about this message, oldest first. */
   decisions: z.array(
-    DecisionRow.extend({ ruleId: z.string().nullable(), inputTokens: z.number(), outputTokens: z.number(), durationMs: z.number().nullable() }),
+    DecisionRow.extend({
+      ruleId: z.string().nullable(),
+      inputTokens: z.number(),
+      outputTokens: z.number(),
+      durationMs: z.number().nullable(),
+      /** What the user said this message is, where they answered for this decision; it beats the decision. */
+      answer: z.object({ labelId: z.string().nullable(), disposition: z.string() }).nullable(),
+    }),
   ),
   /** Every mailbox change made to this message, oldest first. */
   actions: z.array(
@@ -327,12 +335,26 @@ export const MessageDetail = z.object({
 });
 export type MessageDetail = z.infer<typeof MessageDetail>;
 
+/**
+ * What a sender's or domain's next message gets (`nextOf`, src/dashboard/queries/contacts.ts): what the rule for all their
+ * mail does (`ruleId`), or else what their mail has been, the reader's answers included; `usually` when it is of several kinds.
+ */
+const NextMail = z.object({
+  labelId: z.string().nullable(),
+  labelName: z.string().nullable(),
+  disposition: z.string(),
+  usually: z.boolean(),
+  ruleId: z.string().nullable(),
+});
+export type NextMail = z.infer<typeof NextMail>;
+
 /** GET /api/sender and /api/domain. */
 export const SenderPage = z.object({
   kind: z.enum(['sender', 'domain']),
   /** The name the sender last used. */
   name: held.nullable(),
   profile: SenderProfile,
+  next: NextMail,
   /** For an address that sends under more than one name: each name (null for mail with none), most mail first, with what its mail is by label. */
   names: z.array(
     z.object({
@@ -350,6 +372,27 @@ export const SenderPage = z.object({
   decisions: z.array(ListedDecision),
 });
 export type SenderPage = z.infer<typeof SenderPage>;
+
+/** GET /api/contacts: everyone the person has mail from, newest first, a page of them and how many match in all. */
+export const ContactPage = z.object({
+  total: z.number(),
+  rows: z.array(
+    z.object({
+      address: held,
+      /** The name on their newest message. */
+      name: held.nullable(),
+      contact: Contact,
+      given: Given.nullable(),
+      /** Rules that name them or their domain. */
+      rules: z.number(),
+      next: NextMail,
+      /** Messages in the last 30 days. */
+      recent: z.number(),
+      lastSeenAt: z.number(),
+    }),
+  ),
+});
+export type ContactPage = z.infer<typeof ContactPage>;
 
 /** One sender's mail that is waiting on the user. GET /api/suggestion. */
 export const SuggestionDetail = z.object({
@@ -474,16 +517,9 @@ export const RuleInbox = z.object({
 });
 export type RuleInbox = z.infer<typeof RuleInbox>;
 
-/** One waiting suggestion: what sift proposes for one message, which the user has not answered. */
-export const SuggestionItem = z.object({
-  accountId: z.string(),
-  messageId: z.string(),
+/** What Sift thinks of a message: its current decision, as For review's rows and Inbox's show it. */
+const Thinks = z.object({
   decisionId: z.number(),
-  sender: held,
-  senderName: held.nullable(),
-  contact: Contact,
-  subject: held,
-  receivedAt: z.number(),
   /** What sift would do. `review` without a label means it could not place the mail. */
   disposition: z.string(),
   /** What sift says the mail is, or null if it could not place it. */
@@ -492,6 +528,18 @@ export const SuggestionItem = z.object({
   /** Which tier decided, and how sure a model was (0 to 1); null when no model was asked. */
   stage,
   confidence: z.number().nullable(),
+});
+
+/** One waiting suggestion: what sift proposes for one message, which the user has not answered. */
+export const SuggestionItem = z.object({
+  accountId: z.string(),
+  messageId: z.string(),
+  sender: held,
+  senderName: held.nullable(),
+  contact: Contact,
+  subject: held,
+  receivedAt: z.number(),
+  ...Thinks.shape,
   /**
    * What else it might be, most likely first: the labels the sender's other mail has had, with the share
    * of it each had. Until the model ranks its own guesses, this is the best second opinion sift holds.
@@ -554,6 +602,29 @@ export const FeedbackReply = z.object({
   notFixed: z.string().nullable(),
 });
 export type FeedbackReply = z.infer<typeof FeedbackReply>;
+
+const party = z.strictObject({ address: text(320), name: text().optional() });
+const sending = {
+  /** The mailbox that sends it. */
+  accountId: text(),
+  /** Its Message-ID, made by the page once for the press of Send and given again when that press is tried again, so it goes once. */
+  id: text(),
+  /** That mailbox's address or one of its aliases. */
+  from: party,
+  to: z.array(party).max(100),
+  cc: z.array(party).max(100),
+  text: z.string().max(200_000),
+};
+
+/**
+ * The body of POST /api/mail/send: what the person wrote. A reply names the message it answers, in the same mailbox; its
+ * subject, conversation and the Message-IDs it follows are read from the record, not sent.
+ */
+export const SendRequest = z.union([
+  z.strictObject({ ...sending, subject: z.string().max(900) }),
+  z.strictObject({ ...sending, replyTo: z.strictObject({ messageId: text() }) }),
+]);
+export type SendRequest = z.infer<typeof SendRequest>;
 
 /** A label: what mail is, and what sift does with it. */
 export const LabelSummary = z.object({
@@ -638,8 +709,95 @@ export const InboxEstimate = z.object({
 });
 export type InboxEstimate = z.infer<typeof InboxEstimate>;
 
+/** Which conversations Inbox lists: all, those Sift would leave in the inbox or could not place, or those it would move out. */
+export const MAIL_VIEWS = ['all', 'needs', 'sorted'] as const;
+export type MailView = (typeof MAIL_VIEWS)[number];
+
+/** GET /api/mail/threads: one conversation with mail in the inbox now. */
+export const MailThread = z.object({
+  accountId: z.string(),
+  threadId: z.string(),
+  /** Its newest message's. */
+  subject: held,
+  /** Who wrote the messages Sift has of it, oldest first, each once: a name, or the address of a sender without one; the reader's own mailboxes as "me". */
+  who: z.array(held),
+  /** The messages Sift has recorded of it, oldest first; the newest is the one the reader opens. Sync records mail that arrives, not what the person sent. */
+  messageIds: z.array(z.string()),
+  unread: z.boolean(),
+  newestAt: z.number(),
+  /** Where it is, for a search that looks past the inbox: in it, out of it, or only what the person sent. */
+  place: z.enum(['inbox', 'archived', 'sent']),
+  /** The start of its newest message's text, on one line, where Sift holds it. */
+  preview: held.nullable(),
+  /** About its newest message; null when Sift has not decided it. */
+  thinks: Thinks.nullable(),
+});
+export type MailThread = z.infer<typeof MailThread>;
+
+export const MailThreads = z.object({
+  /** Newest first. */
+  threads: z.array(MailThread),
+  /** Where the next page starts, for `before`; null at the end. A search may give fewer than a page and still have more. */
+  next: z.string().nullable(),
+});
+export type MailThreads = z.infer<typeof MailThreads>;
+
+/** GET /api/mail/thread: the messages Sift has of one conversation, oldest first, each as its folded row shows it. A message's text is `/api/message`'s. */
+export const MailConversation = z.object({
+  accountId: z.string(),
+  threadId: z.string(),
+  messages: z.array(
+    z.object({
+      messageId: z.string(),
+      fromAddress: held,
+      fromName: held.nullable(),
+      receivedAt: z.number(),
+      unread: z.boolean(),
+      preview: held.nullable(),
+    }),
+  ),
+});
+export type MailConversation = z.infer<typeof MailConversation>;
+
+/** The body of POST /api/mail/change: the person's own press on messages in their inbox. */
+export const MailChange = z.strictObject({
+  accountId: z.string(),
+  messageIds: z.array(z.string().min(1).max(200)).min(1).max(200),
+  change: z.enum(['archive', 'read', 'unread']),
+});
+export type MailChange = z.infer<typeof MailChange>;
+
+/** POST /api/mail/ask: the person's words as a filter on Inbox's list, each part of it one the list takes, or why there is none. Held as it is stored. */
+export const MailAsk = z.union([
+  z.object({
+    filter: z.object({
+      from: heldValues,
+      domain: heldValues,
+      label: held.optional(),
+      view: z.enum(['needs', 'sorted']).optional(),
+      unread: z.literal(true).optional(),
+      /** `YYYY-MM-DD`, in the reader's days. */
+      since: held.optional(),
+      /** Words for Inbox's search, which the page puts in it. */
+      words: heldValues,
+    }),
+    /** What of their words it leaves out. */
+    note: held.optional(),
+  }),
+  z.object({ cannot: held }),
+]);
+export type MailAsk = z.infer<typeof MailAsk>;
+
 /** Which of the newest messages a press goes through: the whole inbox, or enough to teach with. */
 export const InboxReach = z.enum(['inbox', 'recent']);
+
+/** How far back Inbox keeps the viewer's mail. */
+export const MailWindow = z.enum(MAIL_WINDOWS);
+
+/** GET /api/mail/reach: for each window, about how many messages copying it reads from Gmail, what they take to keep, in bytes, and how long reading them takes. */
+const Reach = z.object({ messages: z.number(), bytes: z.number(), minutes: z.number() });
+export const MailReach = z.object({ year: Reach, three_years: Reach, all: Reach });
+export type MailReach = z.infer<typeof MailReach>;
 
 /** GET /api/manage: everything the Settings view shows. */
 export const ManageState = z.object({
@@ -647,6 +805,11 @@ export const ManageState = z.object({
   owner: z.boolean(),
   /** Whether sift is on for the viewer. Off, it only suggests for their mail; on, it carries its decisions out in Gmail. */
   active: z.boolean(),
+  /** Whether Inbox is on for the viewer: Sift keeps a copy of their mail, and may send as them. */
+  mail: z.boolean(),
+  mailWindow: MailWindow,
+  /** Copying the viewer's mailboxes for Inbox, all of them together: `total` is Gmail's estimate. Null when none is going. */
+  copying: z.object({ done: z.number(), total: z.number(), startedAt: z.number() }).nullable(),
   /** The viewer's own model: which one they chose, how they can reach one, and a ChatGPT sign-in under way. */
   model: z.object({
     chosen: z.string().nullable(),
@@ -656,12 +819,15 @@ export const ManageState = z.object({
     pending: z.union([SignInCode, z.object({ error: z.string() })]).nullable(),
   }),
   activity: z.object({ running: z.boolean(), lastPassAt: z.number().nullable(), problems: z.array(z.string()), expired: z.array(z.string()) }),
+  /** `canSend`: Google let Sift send from it (`/auth/login?grant=send&mailbox=…` asks). `aliases`: its other addresses in Gmail, which it may send as. */
   accounts: z.array(
     z.object({
       id: z.string(),
       email: z.string(),
       lastSyncedAt: z.number().nullable(),
       primary: z.boolean(),
+      canSend: z.boolean(),
+      aliases: z.array(z.string()),
       /** When Google will end its sign-in, known only once one has ended a week after it was given (a client in Testing). */
       signInEnds: z.number().nullable(),
     }),
@@ -705,6 +871,8 @@ export const Session = z.object({
   cloud: z.boolean(),
   /** Where the page sends how long it took and what failed in it: this server's Sentry project. Null when the server sends nothing. */
   telemetry: z.object({ dsn: z.string(), release: z.string().nullable(), environment: z.string().nullable() }).nullable(),
+  /** Which build of the page this server came with; null when it was not built with one (tests). */
+  build: z.string().nullable(),
 });
 export type Session = z.infer<typeof Session>;
 

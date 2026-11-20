@@ -1,6 +1,7 @@
 import { z } from 'zod';
-import { lastSyncedAt, listAccounts, signInEnds } from '../../../../store/accounts.ts';
+import { canSend, lastSyncedAt, listAccounts, mailboxAliases, signInEnds } from '../../../../store/accounts.ts';
 import { inboxProgress } from '../../../../store/inbox.ts';
+import { copyProgress } from '../../../../store/copies.ts';
 import { MAX_LABELS } from '../../../../store/labels.ts';
 import { waitingCount } from '../../../../learn/feedback.ts';
 import { preferences } from '../../../../store/preferences.ts';
@@ -18,6 +19,14 @@ async function manageState({ db, controls, person }: Context, scope: Scope): Pro
   return {
     owner: scope.owner,
     active: own.active,
+    mail: own.mail,
+    mailWindow: own.mailWindow,
+    copying: (
+      await copyProgress(
+        db,
+        accounts.map((a) => a.id),
+      )
+    ).going,
     model: { chosen: own.model, reasoning: own.reasoning, ...(controls ? await controls.modelSignIns(db) : { choices: [], signedIn: [], pending: null }) },
     activity: {
       ...activity,
@@ -31,6 +40,8 @@ async function manageState({ db, controls, person }: Context, scope: Scope): Pro
         email: a.email,
         lastSyncedAt: await lastSyncedAt(db, a.id),
         primary: a.id === person?.primary,
+        canSend: await canSend(db, a.id),
+        aliases: await mailboxAliases(db, a.id),
         signInEnds: ends.get(a.id) ?? null,
       })),
     ),

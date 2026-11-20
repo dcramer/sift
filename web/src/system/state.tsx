@@ -1,5 +1,5 @@
 'use client';
-import { type ReactNode, useId } from 'react';
+import { type ReactNode, useEffect, useId, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { Table, Tr } from './table.tsx';
 
@@ -73,4 +73,22 @@ export function Loading({ rows = 6, children }: { rows?: number; children?: Reac
       </Table>
     </div>
   );
+}
+
+/**
+ * The end of a list read a page at a time (Inbox): reaching it, a screen's height before it shows, asks for the next
+ * page, whose rows then grow the list downward. Nothing of its own is seen.
+ */
+export function More({ onReach }: { onReach: () => void }) {
+  const end = useRef<HTMLDivElement>(null);
+  const latest = useRef(onReach);
+  useEffect(() => {
+    latest.current = onReach;
+  });
+  useEffect(() => {
+    const seen = new IntersectionObserver((entries) => entries.some((entry) => entry.isIntersecting) && latest.current(), { rootMargin: '100% 0px' });
+    if (end.current) seen.observe(end.current);
+    return () => seen.disconnect();
+  }, []);
+  return <div ref={end} aria-hidden className="h-px" />;
 }

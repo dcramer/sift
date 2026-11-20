@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -14,9 +14,10 @@ export const TEMPLATES = 'SIFT_E2E_TEMPLATE';
 export const HELD = 'SIFT_E2E_HELD';
 /**
  * `full` is verify-sift's seed (its SKILL.md says what is in it); `bare` leaves the work mailbox without labels, so the page is the setting-up steps;
- * `on` has had a pass with Sift on (`--on` in the seed); `chatgpt` reaches its model through a ChatGPT plan.
+ * `on` has had a pass with Sift on (`--on` in the seed); `chatgpt` reaches its model through a ChatGPT plan; `inbox` has Inbox on, with the
+ * text of the inbox's mail, a fake Gmail that holds the seed's mail, and may send from its first mailbox (`--inbox`).
  */
-export type Variant = 'full' | 'bare' | 'on' | 'chatgpt';
+export type Variant = 'full' | 'bare' | 'on' | 'chatgpt' | 'inbox';
 
 const freePort = () =>
   new Promise<number>((done, fail) => {
@@ -90,9 +91,12 @@ async function start(variant: Variant, cloud: boolean, listing: boolean, signedO
     return started ? { port, child } : serve(tries - 1);
   };
   const { port, child } = await withTimeout(serve(3), 30_000, 'serve.ts did not start');
+  const sentFile = join(dir, 'sent.json');
   return {
     url: `http://127.0.0.1:${port}`,
     cookie: template.cookie,
+    /** What the stand-in Gmail was asked to send, oldest first. */
+    sent: () => (existsSync(sentFile) ? (JSON.parse(readFileSync(sentFile, 'utf8')) as { mailbox: string; id: string; threadId: string; raw: string }[]) : []),
     stop: async () => {
       const exited = new Promise((done) => child.once('exit', done));
       // Not Next.js's own stop, which waits for a run's step under way: one may wait on Gmail for good (`listing`).
@@ -207,17 +211,20 @@ export async function boxOf(target: Locator) {
   return box;
 }
 
-/** The open message panel. */
-export const panel = (page: Page) => page.getByRole('dialog').filter({ has: page.getByRole('combobox', { name: 'What this message is' }) });
+/** The reader: a message, or a conversation, open in the list's place. */
+export const reader = (page: Page) => page.getByRole('region').filter({ has: page.getByRole('combobox', { name: 'What this message is' }) });
 
-/** The open message panel's heading: the subject of the message it shows. */
-export const panelHeading = (page: Page, subject: string) => panel(page).getByRole('heading', { name: subject, level: 2 });
+/** The reader's heading: the subject of what it shows. */
+export const readerHeading = (page: Page, subject: string) => reader(page).getByRole('heading', { name: subject, level: 1 });
 
-/** Opens the message in the list by its subject, once the panel shows it. */
+/** The reader's Back, to the list it was opened from. */
+export const back = (page: Page) => reader(page).getByRole('button', { name: /^Back to / });
+
+/** Opens the message in the list by its subject, once the reader shows it. */
 export async function openMessage(page: Page, subject: string) {
   await page.getByRole('cell', { name: subject }).click();
-  await expect(panelHeading(page, subject)).toBeVisible();
-  return panel(page);
+  await expect(readerHeading(page, subject)).toBeVisible();
+  return reader(page);
 }
 
 /** What opens message `id` (`m6`) over a page, for after its `?` or `&`. */
@@ -234,7 +241,7 @@ export const reviewRows = (page: Page) => page.getByRole('row').filter({ has: pa
 
 export const reviewSearch = (page: Page) => page.getByRole('searchbox', { name: 'Search senders and subjects' });
 
-/** The masthead's link to For review, whose name ends in how many messages wait. */
+/** The link to For review among the sections, whose name ends in how many messages wait. */
 export const forReviewLink = (page: Page) => page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: /^For review/ });
 
 /**
@@ -343,4 +350,57 @@ export const patchJson = (page: Page, url: string, change: (json: any) => object
 export async function throughChatGPT(page: Page) {
   const model = 'openai-codex/gpt-5.6-luna';
   await patchJson(page, '**/api/models*', (models) => ({ ...models, models: [model], shortlist: { 'openai-codex': [model] }, costs: { [model]: 0.4 } }));
+}
+
+/** The seed's second mailbox, which holds no mail. */
+export const WORK = 'me@work.example.org';
+
+/** The mailbox switch showing: the rail's on a desktop, the menu's on a phone once it is open. Named by what it shows. */
+export const mailboxSwitch = (page: Page) => page.getByRole('combobox', { name: /^Mailbox, / }).filter({ visible: true });
+
+/** Shows `mailbox`, or All mailboxes, with the switch showing. */
+export async function switchMailbox(page: Page, mailbox: string) {
+  await mailboxSwitch(page).click();
+  await page.getByRole('option', { name: mailbox, exact: true }).click();
+}
+
+/** The mailbox each read of `path` asked for, null for all of them, in the order asked. */
+export function mailboxesAsked(page: Page, path: string) {
+  const asked: (string | null)[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === path) asked.push(url.searchParams.get('mailbox'));
+  });
+  return asked;
+}
+
+/** Inbox among the sections, there only while it is on. */
+export const inboxLink = (page: Page) => page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: 'Inbox' });
+
+/** Settings' Inbox section. */
+export const settingsInbox = (page: Page) => section(settings(page), 'Inbox');
+
+/** The dialog that asks how far back Inbox keeps the mail: turning it on, or Change… while it is. */
+export const mailWindow = (page: Page) => page.getByRole('dialog', { name: /^Keep how much/ });
+
+/** Inbox's search, which looks through all the mail Sift keeps. */
+export const inboxSearch = (page: Page) => page.getByRole('searchbox', { name: 'Search mail' });
+
+/** Inbox's rows, each a conversation with a check to select it. Not on a phone, which has no checks. */
+export const inboxRows = (page: Page) => page.getByRole('row').filter({ has: page.getByRole('checkbox', { name: /^Select / }) });
+
+/** The conversation in Inbox whose newest subject this is. */
+export const inboxRow = (page: Page, subject: string) =>
+  page.getByRole('row').filter({ has: page.getByRole('checkbox', { name: `Select ${subject}`, exact: true }) });
+
+/** The composer, by its title: new mail in a panel of its own, a reply or a forward in the reader. */
+export const composer = (page: Page, title: 'New message' | 'Reply' | 'Reply to all' | 'Forward') =>
+  page.getByRole(title === 'New message' ? 'dialog' : 'region', { name: title, exact: true });
+
+/** A message the stand-in Gmail was asked to send, its headers unfolded by name and its text decoded. */
+export function readSent(raw: string): { headers: Record<string, string>; text: string } {
+  const split = raw.indexOf('\r\n\r\n');
+  const lines = raw.slice(0, split).replaceAll('\r\n ', ' ').split('\r\n');
+  const headers = Object.fromEntries(lines.map((line) => [line.slice(0, line.indexOf(':')), line.slice(line.indexOf(':') + 2)]));
+  return { headers, text: Buffer.from(raw.slice(split + 4).replaceAll('\r\n', ''), 'base64').toString('utf8') };
 }

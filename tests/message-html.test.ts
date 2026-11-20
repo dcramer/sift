@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { cleanHtml, mailDocument } from '../src/dashboard/mail-html.ts';
 import { readContent } from '../src/gmail/body.ts';
 import { recordSync } from '../src/store/accounts.ts';
-import { suggestionBodies } from '../src/store/query.ts';
+import { readBodies } from '../src/store/query.ts';
 import { people } from '../src/store/people.ts';
 import type { Sql } from '../src/store/sql.ts';
 import type { Store } from '../src/store/store.ts';
@@ -100,7 +100,7 @@ describe('the frame route', () => {
       '2',
       1000,
     );
-    await db.insert(suggestionBodies).values([
+    await db.insert(readBodies).values([
       { accountId: ACCOUNT, messageId: 'm1', bodyText: 'Sale', bodyHtml: HTML, fetchedAt: 1000 },
       { accountId: ACCOUNT, messageId: 'plain', bodyText: 'Plain', bodyHtml: null, fetchedAt: 1000 },
     ]);

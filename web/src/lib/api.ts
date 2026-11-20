@@ -1,9 +1,11 @@
-import { QueryCache, QueryClient, environmentManager, keepPreviousData, onlineManager, useQuery } from '@tanstack/react-query';
-import { useSyncExternalStore } from 'react';
+import { QueryCache, QueryClient, environmentManager, keepPreviousData, onlineManager, useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useContext, useSyncExternalStore } from 'react';
+import { Mailbox } from './narrowed.ts';
 import { traceHeaders } from './trace.ts';
 
 export type {
   Contact,
+  ContactPage,
   InboxEstimate,
   DecisionPage,
   DecisionRow,
@@ -13,6 +15,11 @@ export type {
   LabelProposal,
   LabelSummary,
   ListedDecision,
+  MailAsk,
+  MailConversation,
+  MailReach,
+  MailThread,
+  MailView,
   ManageState,
   MessageDetail,
   Removed,
@@ -33,13 +40,20 @@ export type {
 } from '../../../src/dashboard/types.ts';
 export type { Confidential } from '../../../src/confidential.ts';
 import type {
+  ContactPage,
   DecisionPage,
   InboxEstimate,
+  MailReach,
   FactFilter,
   FeedbackReply,
   FeedbackRequest,
   Given,
   LabelProposal,
+  MailAsk,
+  MailChange,
+  MailConversation,
+  MailThreads,
+  MailView,
   ManageState,
   MessageDetail,
   Models,
@@ -51,6 +65,7 @@ import type {
   RuleSummary,
   RuleUsage,
   RuleWaiting,
+  SendRequest,
   SenderPage,
   Session,
   SignInCode,
@@ -70,6 +85,16 @@ interface DecisionQuery {
   fact: FactFilter | '';
   /** A label's id; empty for any. */
   label: string;
+  limit: number;
+  offset: number;
+}
+
+interface ContactQuery {
+  q: string;
+  /** Empty for any. */
+  standing: Given | '';
+  /** How they and the person know each other; empty for any. */
+  know: 'new' | 'mutual' | 'one-way' | '';
   limit: number;
   offset: number;
 }
@@ -141,9 +166,14 @@ async function send(path: string, init: RequestInit, unreachable: string): Promi
   return response;
 }
 
+/** The mailbox a read is narrowed to, by the signal `useLoaded` gave it, so no read has to pass it along. */
+const narrowedBy = new WeakMap<AbortSignal, string>();
+
 async function get<T>(path: string, params: Record<string, string | number>, signal: AbortSignal): Promise<T> {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) if (value !== '') query.set(key, String(value));
+  const mailbox = narrowedBy.get(signal);
+  if (mailbox) query.set('mailbox', mailbox);
   const response = await send(`${path}?${query}`, { signal, headers: traceHeaders() }, 'Sift cannot be reached.');
   if (!response.ok) throw new Refused(response.status, await reason(response));
   return (await response.json()) as T;
@@ -214,6 +244,8 @@ export const api = {
   message: (id: string, signal: AbortSignal, mailbox = '') => get<MessageDetail>('/api/message', mailbox ? { id, mailbox } : { id }, signal),
   /** Where a frame loads a message as the HTML Sift holds for it. */
   messageHtml: (id: string, mailbox: string) => `/api/message/html?${new URLSearchParams({ id, mailbox })}`,
+  /** Everyone the person has mail from, newest first, a page at a time. */
+  contacts: (q: ContactQuery, signal: AbortSignal) => get<ContactPage>('/api/contacts', { ...q }, signal),
   /** `name` lists only their mail under that name. */
   sender: (address: string, signal: AbortSignal, name?: string) => get<SenderPage>('/api/sender', name === undefined ? { address } : { address, name }, signal),
   domain: (domain: string, signal: AbortSignal) => get<SenderPage>('/api/domain', { domain }, signal),
@@ -232,6 +264,8 @@ export const api = {
   models: (signal: AbortSignal) => get<Models>('/api/models', {}, signal),
   /** The reader's own: true, sift carries out its decisions in their Gmail. */
   setActive: (active: boolean) => post('/api/active', { active }),
+  /** Mail the person wrote, sent as them. */
+  send: (mail: SendRequest) => post<{ id: string; threadId: string }>('/api/mail/send', mail),
   /** The reader's own model, `provider/model-id`, or null for none. */
   setModel: (model: string | null) => post('/api/model', { model }),
   setReasoning: (reasoning: ManageState['model']['reasoning']) => post('/api/model/reasoning', { reasoning }),
@@ -281,6 +315,38 @@ export const api = {
   dismissProposal: (id: number) => post('/api/proposals', { id }),
   /** `message`: what the page will not show by itself, if anything. */
   undo: (id: number) => post<{ message: string | null }>('/api/undo', { id }),
+  /** Inbox's conversations, a page from `before`; empty `label`, `q`, `from` and `domain` (the last two comma-separated) narrow nothing. */
+  mailThreads: (
+    query: { view: MailView; label: string; q: string; unread: boolean; from: string; domain: string; since: number | null },
+    before: string,
+    signal: AbortSignal,
+  ) =>
+    get<MailThreads>(
+      '/api/mail/threads',
+      {
+        view: query.view,
+        label: query.label,
+        q: query.q,
+        ...(query.unread ? { unread: 1 } : {}),
+        from: query.from,
+        domain: query.domain,
+        ...(query.since === null ? {} : { since: query.since }),
+        before,
+      },
+      signal,
+    ),
+  /** The model turns words into a filter on Inbox's list. `today` is the reader's, `YYYY-MM-DD`. */
+  askMail: (words: string, today: string) => post<MailAsk>('/api/mail/ask', { words, today }),
+  /** What a conversation says: recorded already, or asked of the model now. */
+  /** A conversation by Gmail's id, in whichever mailbox holds it; `mailbox` when the list it came from said. */
+  mailThread: (thread: string, signal: AbortSignal, mailbox = '') =>
+    get<MailConversation>('/api/mail/thread', mailbox ? { thread, mailbox } : { thread }, signal),
+  /** The reader's own press on mail in their inbox. `actions`: what landed, for Undo. */
+  changeMail: (change: MailChange) => post<{ actions: number[]; missed: number }>('/api/mail/change', change),
+  /** Whether Sift keeps a copy of the person's mail, for Inbox, and how far back. */
+  setMail: (on: boolean, window?: ManageState['mailWindow']) => post('/api/mail/on', window ? { on, window } : { on }),
+  /** What copying the mail for each window would take, from Gmail's counts. */
+  mailReach: (signal: AbortSignal) => get<MailReach>('/api/mail/reach', {}, signal),
   inboxEstimate: (reach: 'inbox' | 'recent', signal: AbortSignal) => get<InboxEstimate>('/api/inbox', { reach }, signal),
   startInbox: (reach: 'inbox' | 'recent') => post('/api/inbox/start', { reach }),
   /** Stop going through the inbox, or with `rule`, stop applying it. */
@@ -348,11 +414,18 @@ export interface Loaded<T> {
  * Load `fetcher` now, again whenever `key` changes, every `refreshMs` while the tab is visible, when the
  * tab is returned to and when sift comes back after being unreachable. Views that share a `key` share
  * one request. A failed refresh keeps the last good data on screen and reports the error beside it.
+ * Narrowed to the `Mailbox` it is drawn under, or to `mailbox` (`''` for all of them), and loaded again for another.
  */
-export function useLoaded<T>(key: string, fetcher: (signal: AbortSignal) => Promise<T>, refreshMs = 30_000): Loaded<T> {
+export function useLoaded<T>(key: string, fetcher: (signal: AbortSignal) => Promise<T>, refreshMs = 30_000, mailbox?: string): Loaded<T> {
+  const under = useContext(Mailbox);
+  const narrowed = mailbox ?? under;
   const query = useQuery({
-    queryKey: [key],
-    queryFn: ({ signal }) => fetcher(signal),
+    // All mailboxes is the key alone, as the server draws it (`src/sift/page-data.ts`).
+    queryKey: narrowed ? [key, narrowed] : [key],
+    queryFn: ({ signal }) => {
+      if (narrowed) narrowedBy.set(signal, narrowed);
+      return fetcher(signal);
+    },
     refetchInterval: refreshMs,
     placeholderData: keepPreviousData,
   });
@@ -363,5 +436,55 @@ export function useLoaded<T>(key: string, fetcher: (signal: AbortSignal) => Prom
     loading: query.isPending,
     at: query.dataUpdatedAt,
     reload: () => void query.refetch({ cancelRefetch: false }),
+  };
+}
+
+/**
+ * Change what `useLoaded(key, …, '')` holds now, for a change this page made and knows the result of, so a view drawn
+ * from it before it is read again (a conversation opened again straight after it was read) is not drawn from the old.
+ */
+export function changeLoaded<T>(key: string, change: (old: T) => T) {
+  queryClientFor().setQueryData<T>([key], (old) => (old === undefined ? old : change(old)));
+}
+
+export interface Pages<T> {
+  pages: T[];
+  error: string | null;
+  loading: boolean;
+  /** There is more after the last page. */
+  more: boolean;
+  /** Load the page after the last, unless one is already on its way. */
+  next: () => void;
+}
+
+/**
+ * A list read a page at a time, as `useLoaded` reads one: each page from where the last ended (`next` in its reply, null
+ * at the end). Read again, every page loaded so far is.
+ */
+export function usePages<T extends { next: string | null }>(
+  key: string,
+  fetcher: (before: string, signal: AbortSignal) => Promise<T>,
+  refreshMs = 60_000,
+): Pages<T> {
+  const narrowed = useContext(Mailbox);
+  const query = useInfiniteQuery({
+    queryKey: narrowed ? [key, narrowed] : [key],
+    queryFn: ({ pageParam, signal }) => {
+      if (narrowed) narrowedBy.set(signal, narrowed);
+      return fetcher(pageParam, signal);
+    },
+    initialPageParam: '',
+    getNextPageParam: (last) => last.next ?? undefined,
+    refetchInterval: refreshMs,
+    placeholderData: keepPreviousData,
+  });
+  return {
+    pages: query.data?.pages ?? [],
+    error: query.error?.message ?? null,
+    loading: query.isPending,
+    more: query.hasNextPage,
+    next: () => {
+      if (!query.isFetchingNextPage) void query.fetchNextPage();
+    },
   };
 }

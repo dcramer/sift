@@ -4,7 +4,7 @@ import { listAccounts } from '../src/store/accounts.ts';
 import { openEnvelope, openPart } from '../src/store/content.ts';
 import { people } from '../src/store/people.ts';
 import { listProposals } from '../src/store/proposals.ts';
-import { decisions, messages, suggestionBodies } from '../src/store/query.ts';
+import { decisions, messages, readBodies } from '../src/store/query.ts';
 import { listRules } from '../src/store/rules.ts';
 import { openStore } from '../src/store/store.ts';
 
@@ -24,7 +24,7 @@ export async function heldValues(home: string): Promise<string[]> {
       const m = plain(openEnvelope(db, row.accountId, row.id, { headers: row.headers }));
       add(m.subject, m.fromAddress, m.fromName, ...[...m.to, ...m.cc].flatMap((a) => [a.address, a.name]));
     }
-    for (const row of await db.select().from(suggestionBodies))
+    for (const row of await db.select().from(readBodies))
       add(
         plain(openPart(db, row.accountId, row.messageId, 'text', row.bodyText))
           ?.trim()

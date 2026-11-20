@@ -1,0 +1,2 @@
+ALTER TABLE "actions" DROP CONSTRAINT "actions_type";--> statement-breakpoint
+ALTER TABLE "actions" ADD CONSTRAINT "actions_type" CHECK ("actions"."type" IN ('archive', 'spam', 'label', 'undo', 'unsubscribe', 'filter', 'unfilter', 'digest', 'send'));

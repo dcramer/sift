@@ -59,7 +59,7 @@ export function DescribeStep({
           <TextArea
             autoFocus
             aria-label={question}
-            className="min-h-28 max-md:min-h-48"
+            className="min-h-28 phone:min-h-48"
             maxLength={2000}
             placeholder={placeholder}
             value={value}

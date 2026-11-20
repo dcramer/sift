@@ -50,7 +50,8 @@ export function Table({ keys = false, children }: { keys?: boolean; children: Re
   return (
     <div ref={element} className="bleed">
       {/* The bar below sits outside the sideways scroll, which would otherwise hold it in place instead of the screen. */}
-      <div className="overflow-x-auto">
+      {/* A table in days is clipped rather than scrolled on a phone, where it keeps one column: a scroll here would hold a day's sticky heading to the table. */}
+      <div className="overflow-x-auto phone:has-[th[scope=colgroup]]:overflow-x-clip">
         <table className="w-full text-left">
           <Stops value={stop}>{children}</Stops>
         </table>
@@ -83,7 +84,10 @@ export function Tr({ onOpen, holds, className, ...props }: ComponentProps<'tr'> 
       <tr
         tabIndex={0}
         data-holds={holds?.join(' ')}
-        className={cn('row group/row cursor-pointer hover:bg-(--fill) focus-visible:bg-(--fill-strong) focus-within:bg-(--fill)', className)}
+        className={cn(
+          'row group/row cursor-pointer hover:bg-(--fill) focus-visible:bg-(--fill-strong) focus-within:bg-(--fill) active:bg-(--fill-strong)',
+          className,
+        )}
         onClick={(event) => {
           // React passes up presses in what a row renders elsewhere, such as a dialog it opened; those are not on the row.
           // Nor is a press on a link in it, which goes where the link does.
@@ -120,7 +124,7 @@ const PHONE = { hide: 'hidden md:table-cell' } as const;
  */
 export function Heads({ shown, children }: { shown?: 'wide' | 'always'; children: ReactNode }) {
   return (
-    <thead className={shown === 'always' ? undefined : shown === 'wide' ? 'max-md:sr-only' : 'sr-only'}>
+    <thead className={shown === 'always' ? undefined : shown === 'wide' ? 'phone:sr-only' : 'sr-only'}>
       <tr>{children}</tr>
     </thead>
   );
@@ -180,7 +184,16 @@ export function Td({ num, quiet, phone, says, className, children, ...props }: C
 export function TrGroup({ title, span }: { title: string; span: number }) {
   return (
     <tr>
-      <th colSpan={span} scope="colgroup" className={cn('heading pt-8 pb-1 text-left [tbody:first-of-type_&]:pt-4', EDGES)}>
+      <th
+        colSpan={span}
+        scope="colgroup"
+        className={cn(
+          'heading pt-8 pb-1 text-left [tbody:first-of-type_&]:pt-4',
+          // On a phone, a small line that stays under the top bar while its rows pass, so the day is always said.
+          'phone:sticky phone:top-(--bar) phone:z-[5] phone:bg-background phone:pt-2 phone:pb-1.5 phone:text-sm phone:tracking-normal phone:text-muted-foreground phone:[tbody:first-of-type_&]:pt-2',
+          EDGES,
+        )}
+      >
         {title}
       </th>
     </tr>
@@ -210,6 +223,33 @@ export function RowActions({ phone, children }: { phone?: 'keep'; children: Reac
       onKeyDown={(event) => event.stopPropagation()}
     >
       <span className="flex items-center justify-end gap-1.5">{children}</span>
+    </td>
+  );
+}
+
+/**
+ * The first cell of a row that can be selected with others, for what the list's bar does to all of them at once (Inbox's
+ * Archive). Pressing it, or X on the row the reader is on, selects the row without opening it. Dropped on a phone,
+ * where the row opens to the same presses.
+ */
+export function RowCheck({ checked, onChange, label }: { checked: boolean; onChange: (checked: boolean) => void; label: string }) {
+  const key = useShortcut('x', 'Select', () => onChange(!checked));
+  return (
+    <td
+      className={cn('w-px py-1.5 pr-1 align-middle', PHONE.hide, EDGES)}
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <label className="flex h-(--control) cursor-pointer items-center gap-1.5">
+        <input
+          type="checkbox"
+          aria-label={label}
+          className="size-3.5 cursor-pointer accent-foreground"
+          checked={checked}
+          onChange={(event) => onChange(event.target.checked)}
+        />
+        <span className="w-4">{key}</span>
+      </label>
     </td>
   );
 }

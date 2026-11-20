@@ -1,5 +1,6 @@
 'use client';
 import { Menu as Base } from '@base-ui/react/menu';
+import { CheckIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 export interface MenuItem {
@@ -8,6 +9,8 @@ export interface MenuItem {
   disabled?: boolean;
   /** Under the label: why it cannot be pressed, or what it will do. */
   note?: string;
+  /** The one of a few ways to see something that is showing now, ticked. */
+  on?: boolean;
 }
 
 /** Who someone is, as the initial of their address. Never a picture: the page loads nothing from another origin. */
@@ -54,9 +57,13 @@ export function Menu({
                 key={item.label}
                 disabled={item.disabled ?? false}
                 onClick={item.onSelect}
+                {...(item.on === undefined ? {} : { role: 'menuitemradio', 'aria-checked': item.on })}
                 className="flex cursor-pointer data-disabled:cursor-default flex-col justify-center px-2 py-1.5 outline-none select-none data-disabled:text-muted-foreground data-highlighted:bg-(--fill-strong) pointer-coarse:min-h-11"
               >
-                <span className="font-medium">{item.label}</span>
+                <span className="flex items-center gap-3 font-medium">
+                  <span className="flex-1">{item.label}</span>
+                  {item.on ? <CheckIcon aria-hidden className="size-3.5" /> : null}
+                </span>
                 {item.note ? <span className="text-muted-foreground">{item.note}</span> : null}
               </Base.Item>
             ))}

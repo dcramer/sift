@@ -28,7 +28,7 @@ export function Onboarding({
 }) {
   return (
     <div className="mx-auto flex min-h-svh w-full max-w-[46rem] flex-col px-4 pb-20 md:px-0">
-      <header className="flex items-center justify-between gap-4 pt-5">
+      <header className="flex items-center justify-between gap-4 pt-[calc(1.25rem+var(--safe-top))]">
         <Wordmark size="lg" />
         {account ? (
           <p className="flex flex-wrap items-baseline justify-end gap-x-4 gap-y-1 text-sm text-muted-foreground">

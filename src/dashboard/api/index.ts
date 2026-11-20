@@ -2,6 +2,7 @@ import type { Frame, Read, Write } from './route.ts';
 import accountDeleteWrite from './routes/account/delete/post.ts';
 import activeWrite from './routes/active/post.ts';
 import checkWrite from './routes/check/post.ts';
+import contactsRead from './routes/contacts/get.ts';
 import decisionsRead from './routes/decisions/get.ts';
 import digestWrite from './routes/digest/post.ts';
 import domainRead from './routes/domain/get.ts';
@@ -21,6 +22,14 @@ import labelsWrite from './routes/labels/post.ts';
 import labelsProposalRead from './routes/labels/proposal/get.ts';
 import labelsProposeWrite from './routes/labels/propose/post.ts';
 import labelsRemoveWrite from './routes/labels/remove/post.ts';
+import mailAskWrite from './routes/mail/ask/post.ts';
+import mailChangeWrite from './routes/mail/change/post.ts';
+import mailOnWrite from './routes/mail/on/post.ts';
+import mailReachRead from './routes/mail/reach/get.ts';
+import mailThreadRead from './routes/mail/thread/get.ts';
+import mailThreadsRead from './routes/mail/threads/get.ts';
+
+import mailSendWrite from './routes/mail/send/post.ts';
 import mailboxPrimaryWrite from './routes/mailbox/primary/post.ts';
 import mailboxRemoveWrite from './routes/mailbox/remove/post.ts';
 import manageRead from './routes/manage/get.ts';
@@ -58,6 +67,7 @@ import usageRead from './routes/usage/get.ts';
  * the session, the scope and the write checks to all of them.
  */
 export const READS: readonly Read[] = [
+  contactsRead,
   decisionsRead,
   domainRead,
   evalRead,
@@ -65,6 +75,9 @@ export const READS: readonly Read[] = [
   examplesRead,
   inboxRead,
   labelsProposalRead,
+  mailReachRead,
+  mailThreadRead,
+  mailThreadsRead,
   manageRead,
   messageRead,
   modelsRead,
@@ -94,6 +107,11 @@ export const WRITES: readonly Write[] = [
   labelsAcceptWrite,
   labelsProposeWrite,
   labelsRemoveWrite,
+  mailAskWrite,
+  mailChangeWrite,
+  mailOnWrite,
+  mailSendWrite,
+
   mailboxPrimaryWrite,
   mailboxRemoveWrite,
   modelWrite,

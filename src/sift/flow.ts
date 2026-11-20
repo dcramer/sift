@@ -31,12 +31,18 @@ export async function upkeep(piece: Work): Promise<void> {
 }
 
 /** @public */
+export async function mailboxCopy(piece: Work): Promise<void> {
+  'use workflow';
+  await doPiece(piece);
+}
+
+/** @public */
 export async function dailyDigests(piece: Work): Promise<void> {
   'use workflow';
   await doPiece(piece);
 }
 
-const FLOWS = { pass: mailboxPass, inbox: inboxRun, eval: testRun, upkeep, digest: dailyDigests } satisfies Record<Work['kind'], unknown>;
+const FLOWS = { pass: mailboxPass, inbox: inboxRun, copy: mailboxCopy, eval: testRun, upkeep, digest: dailyDigests } satisfies Record<Work['kind'], unknown>;
 
 /** Runs in the process Workflow delivered the run to, with that process's Sift. */
 async function doPiece(piece: Work): Promise<void> {

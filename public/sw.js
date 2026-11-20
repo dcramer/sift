@@ -9,6 +9,12 @@ const forEveryone = (response) => response.ok && !/no-store|private/.test(respon
 /** Drawn for everyone, and with no session to read says Sift cannot be reached: where a screen not kept falls back to. */
 const SHELL = '/sender';
 
+/**
+ * How long a page is waited for. A network that connects but never answers (a weak signal, a captive portal) would
+ * otherwise leave the installed app blank; a server starting cold answers well inside it.
+ */
+const PATIENCE = 8000;
+
 /** A built file's path, as pages, scripts and styles name it (a script names the chunks it loads later without `/_next/`). */
 const BUILT = /static\/(?:chunks|media|css)\/[\w.~-]+/g;
 
@@ -50,17 +56,21 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (request.method !== 'GET' || url.origin !== self.location.origin || /^\/(api|auth)\//.test(url.pathname)) return;
 
-  // The server's copy when it answers, since it may be newer; without it, the one kept for that page, or else the shell.
+  // The server's copy when it answers in time, since it may be newer; otherwise the one kept for that page, or else the
+  // shell, which says Sift cannot be reached and loads the page once it can.
   if (request.mode === 'navigate') {
     const page = pageOf(url);
+    const fetched = fetch(request).then((response) => {
+      const copy = forEveryone(response) ? response.clone() : null;
+      event.waitUntil(caches.open(CACHE).then(async (cache) => (copy ? await cache.put(page, copy) : undefined)).then(prune));
+      return response;
+    });
+    const late = new Promise((resolve) => setTimeout(resolve, PATIENCE, null));
     event.respondWith(
-      fetch(request)
-        .then((response) => {
-          const copy = forEveryone(response) ? response.clone() : null;
-          event.waitUntil(caches.open(CACHE).then(async (cache) => (copy ? await cache.put(page, copy) : undefined)).then(prune));
-          return response;
-        })
-        .catch(async () => (await caches.match(page, { cacheName: CACHE })) ?? (await caches.match(SHELL, { cacheName: CACHE })) ?? Response.error()),
+      Promise.race([fetched.catch(() => null), late]).then(
+        async (response) =>
+          response ?? (await caches.match(page, { cacheName: CACHE })) ?? (await caches.match(SHELL, { cacheName: CACHE })) ?? Response.error(),
+      ),
     );
     return;
   }

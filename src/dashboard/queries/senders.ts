@@ -9,6 +9,7 @@ import type { SenderPage, SenderProfile } from '../types.ts';
 import { listDecisions } from './decisions.ts';
 import { listRuleSummaries } from './rules.ts';
 import { keptOut, saved } from './saved.ts';
+import { decidingRule, forExactly, givenBy, kindsOf, nextOf } from './contacts.ts';
 import { plain, seal } from '../../plain.ts';
 
 const later = alias(decisions, 'later');
@@ -108,7 +109,7 @@ async function profileOf(db: Sql, scope: Scope, who: { address: string } | { dom
   return {
     address: seal('address' in who ? who.address : who.domain),
     contact: known.contact,
-    given: known.standing === 'trusted' || known.standing === 'unwanted' || known.standing === 'blocked' ? known.standing : null,
+    given: givenBy(rules.find((r) => forExactly(r, who)) ?? null),
     messages: known.messages,
     firstSeenAt: known.firstSeenAt,
     lastSeenAt: known.lastSeenAt,
@@ -152,6 +153,12 @@ export async function senderPage(
   const profile = await profileOf(db, scope, who, now);
   if (!profile || (profile.messages === 0 && profile.rules.length === 0)) return null;
   const filter = 'address' in who ? { sender: who.address } : { domain: who.domain };
+  const hash = hashOf(db, 'address' in who ? who.address : who.domain);
+  // A rule for one of a domain's senders does not decide what the domain's next mail gets.
+  const deciding = decidingRule('address' in who ? profile.rules : profile.rules.filter((r) => plain(r.match.fromDomain ?? []).includes(who.domain)), (r) =>
+    forExactly(r, who),
+  );
+  const kinds = await kindsOf(db, scope, 'address' in who ? messages.senderHash : messages.domainHash, [hash]);
   const named = 'address' in who ? await namesOf(db, scope, who.address, await labelNames(db)) : null;
   const writing =
     'domain' in who
@@ -182,6 +189,7 @@ export async function senderPage(
     kind: 'address' in who ? 'sender' : 'domain',
     name: seal(named?.newest ?? null),
     profile,
+    next: nextOf(deciding, kinds.get(hash) ?? []),
     names: named?.names ?? [],
     senders,
     decisions:

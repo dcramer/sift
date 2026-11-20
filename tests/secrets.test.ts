@@ -2,6 +2,7 @@ import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import { openDigests, recordHighlights, startDigest } from '../src/store/digests.ts';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
+import { finishAsk, startAsk } from '../src/store/mail-calls.ts';
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig, loadEnvFiles, saveKeyFile, secretPaths } from '../src/config.ts';
 import { installClient, loadClientSecrets } from '../src/gmail/auth.ts';
@@ -16,6 +17,7 @@ import {
   proposalName,
   rekeyContent,
   ruleDraftName,
+  askName,
   ruleName,
   sealJson,
   sealPart,
@@ -25,7 +27,7 @@ import { finishLabelProposal, latestLabelProposal, startLabelProposal } from '..
 import { listProposals } from '../src/store/proposals.ts';
 import { rekeyStore } from '../src/store/rekey.ts';
 import { connectAccount, recordSync } from '../src/store/accounts.ts';
-import { suggestionBodies } from '../src/store/query.ts';
+import { mailBodies, readBodies } from '../src/store/query.ts';
 import type { Sql } from '../src/store/sql.ts';
 import { messageDetail } from '../src/dashboard/queries/messages.ts';
 import { cachedCorrespondent, domainFacts, rememberCorrespondent, senderFacts } from '../src/store/senders.ts';
@@ -210,17 +212,17 @@ describe('mail', () => {
       '2',
       0,
     );
-    const hold = async (db: Sql, messageId: string, text: string, html: string | null) =>
-      await db.insert(suggestionBodies).values({
+    const hold = async (db: Sql, messageId: string, text: string, html: string | null, table: typeof readBodies | typeof mailBodies = readBodies) =>
+      await db.insert(table).values({
         accountId: 'alpha@example.org',
         messageId,
         bodyText: sealPart(db, 'alpha@example.org', messageId, 'text', text)!,
         bodyHtml: sealPart(db, 'alpha@example.org', messageId, 'html', html),
         fetchedAt: 0,
       });
-    const stored = async () =>
+    const stored = async (table: 'read_bodies' | 'mail_bodies' = 'read_bodies') =>
       await raw(plain).all<{ message_id: string; body_text: string; body_html: string | null }>(
-        'SELECT message_id, body_text, body_html FROM suggestion_bodies ORDER BY message_id',
+        `SELECT message_id, body_text, body_html FROM ${table} ORDER BY message_id`,
       );
     return { as, hold, stored };
   }
@@ -359,13 +361,18 @@ describe('mail', () => {
       now: 0,
     });
     await startRuleDraft(db, { accountId: 'alpha@example.org', goal: 'Archive news@example.com', model: 'test/model', now: 0 });
+    const asked = await startAsk(db, { accountId: 'alpha@example.org', words: 'Example news this week', model: 'test/model', now: 0 });
+    await finishAsk(db, 'alpha@example.org', asked, { answer: { filter: { from: ['news@example.com'] } }, lookups: 1, now: 0 });
     const digest = await startDigest(db, { labelId: 'everything_else', accountId: 'alpha@example.org', since: 0, until: 1, count: 1, model: null, now: 0 });
     await recordHighlights(db, digest.id, { highlights: [{ id: 'm1', why: 'Example news, late' }] });
     const stored = await raw(db).all(
       'SELECT r.match, r.except_matches, r.conditions, r.name, f.written, d.reason, a.payload, l.goal, l.labels, l.note, rd.goal, dg.highlights FROM rules r, rule_filters f, decisions d, actions a, label_proposals l, rule_drafts rd, digests dg',
     );
-    expect(JSON.stringify(stored)).not.toContain('example.com');
-    expect(JSON.stringify(stored)).not.toContain('Example news');
+    const asks = await raw(db).all('SELECT words, answer FROM mail_asks');
+    for (const rows of [stored, asks]) {
+      expect(JSON.stringify(rows)).not.toContain('example.com');
+      expect(JSON.stringify(rows)).not.toContain('Example news');
+    }
     // A rule replaced without a name keeps its own.
     expect((await listRules(db))[0]).toMatchObject({
       id,
@@ -389,6 +396,9 @@ describe('mail', () => {
     const [{ goal }] = (await raw(b).all('SELECT goal FROM rule_drafts')) as [{ goal: string }];
     expect(openJson(b, ruleDraftName(b, 'alpha@example.org', 'goal'), goal)).toBe('Archive news@example.com');
     expect((await openDigests(b))[0]?.highlights).toEqual([{ id: 'm1', why: 'Example news, late' }]);
+    const [{ words, answer }] = (await raw(b).all('SELECT words, answer FROM mail_asks')) as [{ words: string; answer: string }];
+    expect(openJson(b, askName(b, 'alpha@example.org', 'words'), words)).toBe('Example news this week');
+    expect(openJson(b, askName(b, 'alpha@example.org', 'answer'), answer)).toEqual({ filter: { from: ['news@example.com'] } });
   });
 
   it('hashes at start the conditions a migration could not, with or without a key', async () => {
@@ -492,6 +502,18 @@ describe('mail', () => {
     for (const row of await stored()) expect(row.body_text).toMatch(/^sift-secret:v1:/);
     for (const row of await raw(await as(B)).all<{ headers: string }>('SELECT headers FROM messages')) expect(row.headers).toMatch(/^sift-secret:v1:/);
     expect(await messageDetail(await as(B), await everything(await as(B)), 'm1')).toMatchObject({ body: 'Hello', hasHtml: true });
+  });
+
+  it('brings the text Inbox keeps under the current key too', async () => {
+    const { as, hold, stored } = await alpha();
+    await hold(await as(NONE), 'm1', 'Hello', '<p>Hello</p>', mailBodies);
+    await hold(await as(A), 'm2', 'Plain', null, mailBodies);
+    expect(await rekeyContent(await as(B_AFTER_A))).toBe(2);
+    expect(await rekeyContent(await as(B))).toBe(0);
+    const [m1, m2] = await stored('mail_bodies');
+    expect(m1).toMatchObject({ body_text: expect.stringMatching(/^sift-secret:v1:/), body_html: expect.stringMatching(/^sift-secret:v1:/) });
+    expect(m2).toMatchObject({ body_text: expect.stringMatching(/^sift-secret:v1:/), body_html: null });
+    expect(openPart(await as(B), 'alpha@example.org', 'm1', 'html', m1!.body_html)).toBe('<p>Hello</p>');
   });
 });
 

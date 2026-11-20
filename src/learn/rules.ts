@@ -8,6 +8,24 @@ import { invokeAgent, reportError } from '../telemetry.ts';
 import { type FoundSender, type RuleDraft, type RuleDrafter, searchSenders } from '../triage/rule-draft.ts';
 
 /**
+ * The senders of all the person's mailboxes whose name, address, list or newest subject has the words looked up: the
+ * model's one look-up, which changes nothing. Read once, on the first look-up: most of what is asked names no sender.
+ */
+export function senderLookup(db: Sql): (query: string) => Promise<FoundSender[]> {
+  let senders: Promise<FoundSender[]> | undefined;
+  return async (query) =>
+    searchSenders(
+      await (senders ??= listAccounts(db).then((accounts) =>
+        senderDirectory(
+          db,
+          accounts.map((a) => a.id),
+        ),
+      )),
+      query,
+    );
+}
+
+/**
  * Ask the model to fill in a rule from what the person said, looking up their senders as it needs, recorded
  * before the call and with what it cost, under `accountId`. It looks senders up in all of the person's mailboxes,
  * as their rules apply to all of them. Nothing is made: the dialog shows the rule for them to add.
@@ -21,18 +39,7 @@ export async function draftRule(
   const now = deps.now ?? Date.now;
   const id = await startRuleDraft(db, { ...request, model: deps.model, now: now() });
   const labels = await listLabels(db);
-  // Read once, on the first look-up: most of what is asked for names no sender.
-  let senders: Promise<FoundSender[]> | undefined;
-  const find = async (query: string) =>
-    searchSenders(
-      await (senders ??= listAccounts(db).then((accounts) =>
-        senderDirectory(
-          db,
-          accounts.map((a) => a.id),
-        ),
-      )),
-      query,
-    );
+  const find = senderLookup(db);
   const answer = await invokeAgent('rules', [db.person, id], { 'sift.rule_draft': id }, async () => {
     try {
       return await deps.draft({ goal: request.goal, labels }, find);

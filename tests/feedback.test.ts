@@ -1,6 +1,7 @@
 import type { Sql } from '../src/store/sql.ts';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { KEEP_BODY_DAYS, keepSuggestionBodies } from '../src/work/bodies.ts';
+import { keepWaitingText, readingOnce } from '../src/work/bodies.ts';
+import { READ_KEEP_DAYS, purgeRead } from '../src/store/kept.ts';
 import { captureExamples } from '../src/work/examples.ts';
 import { triageAccount } from '../src/work/triage.ts';
 import { listSuggestions, suggestionDetail } from '../src/dashboard/queries/suggestions.ts';
@@ -154,7 +155,7 @@ describe('suggestions', () => {
     await suggest('a@example.com', 'archive', NEWS);
     await suggest('b@example.com', 'archive', NEWS);
     await raw(db).run(
-      'INSERT INTO suggestion_bodies (account_id, message_id, body_text, fetched_at) VALUES (?, ?, ?, 0)',
+      'INSERT INTO read_bodies (account_id, message_id, body_text, fetched_at) VALUES (?, ?, ?, 0)',
       ACCOUNT,
       'm1',
       'Five stories\n\n  about   widgets.',
@@ -514,7 +515,7 @@ describe('an answer given without its decision', () => {
 });
 
 describe('reading a suggestion', () => {
-  it('holds the text only of mail that is waiting and that sift would move or could not place, and lets it go', async () => {
+  it('reads the text of waiting mail it would move or could not place once, and keeps it a month whatever becomes of it', async () => {
     await suggest('news@example.com', 'archive', NEWS); // m1
     await suggest('ada@example.org', 'review'); // m2
     await suggest('kept@example.com', 'keep', { labelId: 'personal' }); // m3
@@ -522,33 +523,34 @@ describe('reading a suggestion', () => {
     const fetched: string[] = [];
     const content = (id: string) => ({ text: `Text of ${id}`, html: id === 'm1' ? `<p>Text of ${id}</p>` : null, facts: { hasAttachments: false } });
     const api = { getContent: async (id: string) => (fetched.push(id), id === 'm4' ? null : content(id)) };
-    const stored = async () => await raw(db).all('SELECT message_id, body_text, body_html FROM suggestion_bodies ORDER BY message_id');
+    const reader = () => readingOnce(db, ACCOUNT, api, () => 1000);
+    const stored = async () => await raw(db).all('SELECT message_id, body_text, body_html FROM read_bodies ORDER BY message_id');
 
-    expect(await keepSuggestionBodies(db, api, ACCOUNT, () => 1000)).toBe(3);
+    expect(await keepWaitingText(db, reader(), ACCOUNT, () => 1000)).toBe(3);
     expect(await stored()).toEqual([
       { message_id: 'm1', body_text: 'sift-plain:Text of m1', body_html: 'sift-plain:<p>Text of m1</p>' },
       { message_id: 'm2', body_text: 'sift-plain:Text of m2', body_html: null },
       { message_id: 'm4', body_text: 'sift-plain:', body_html: null },
     ]);
-    expect(await keepSuggestionBodies(db, api, ACCOUNT, () => 1000)).toBe(0);
+    expect(await keepWaitingText(db, reader(), ACCOUNT, () => 1000)).toBe(0);
     expect(fetched.toSorted()).toEqual(['m1', 'm2', 'm4']);
     expect(await messageDetail(db, await everything(db), 'm1')).toMatchObject({ body: 'Text of m1', hasHtml: true });
     expect(await messageDetail(db, await everything(db), 'm2')).toMatchObject({ body: 'Text of m2', hasHtml: false });
     expect(await messageDetail(db, await everything(db), 'm3')).toMatchObject({ body: null, hasHtml: false });
 
-    // Answered: the temporary copy goes at once, to the example.
+    // Answered: the example takes a copy, and the text stays for its month.
     await applyFeedback(db, { accountId: ACCOUNT, sender: 'news@example.com', label: 'newsletter', messageId: 'm1' });
-    expect((await stored()).map((r) => (r as { message_id: string }).message_id)).toEqual(['m2', 'm4']);
     expect(await raw(db).get(`SELECT status, body_text FROM examples WHERE message_id = 'm1'`)).toEqual({
       status: 'captured',
       body_text: 'sift-plain:Text of m1',
     });
-    await keepSuggestionBodies(db, api, ACCOUNT, () => 1000);
-    expect((await stored()).map((r) => (r as { message_id: string }).message_id)).toEqual(['m2', 'm4']);
+    expect((await stored()).map((r) => (r as { message_id: string }).message_id)).toEqual(['m1', 'm2', 'm4']);
 
-    // Never answered: it still goes after the limit.
-    await keepSuggestionBodies(db, api, ACCOUNT, () => 1000 + (KEEP_BODY_DAYS + 1) * DAY);
-    expect(await stored()).toEqual([]);
+    // A month after reading, it goes, and is not read again.
+    expect(await purgeRead(db, 1000 - 1)).toBe(0);
+    expect(await purgeRead(db, 1000 + 1)).toBe(3);
+    expect(await keepWaitingText(db, reader(), ACCOUNT, () => 1000 + READ_KEEP_DAYS * DAY)).toBe(0);
+    expect(fetched).toHaveLength(3);
   });
 
   it("shows one sender's waiting mail, in every mailbox, newest first", async () => {
@@ -576,22 +578,31 @@ describe('examples', () => {
     ]);
   });
 
-  it('keeps only what this pass already read once out of time, and fetches no more', async () => {
+  it('keeps an answer without the text once Sift has let it go, rather than read Gmail again', async () => {
     await suggest('news@example.com', 'archive', NEWS); // m1
-    await suggest('news@example.com', 'archive', NEWS); // m2
     const fetched: string[] = [];
     const api = { getContent: async (id: string) => (fetched.push(id), { text: `Text of ${id}`, html: null, facts: { hasAttachments: false } }) };
-    expect(await keepSuggestionBodies(db, api, ACCOUNT, () => 1000, { held: (id) => id === 'm2', fetch: false })).toBe(0);
-    expect(fetched).toEqual(['m2']);
-    expect(await raw(db).all('SELECT message_id FROM suggestion_bodies')).toEqual([{ message_id: 'm2' }]);
+    await keepWaitingText(
+      db,
+      readingOnce(db, ACCOUNT, api, () => 1000),
+      ACCOUNT,
+      () => 1000,
+    );
+    await purgeRead(db, 1000 + READ_KEEP_DAYS * DAY);
+    await answerEach('news@example.com', 'newsletter', 50);
+    expect(await captureExamples(db, readingOnce(db, ACCOUNT, api), ACCOUNT)).toBe(0);
+    expect(fetched).toEqual(['m1']);
+    expect(await raw(db).get(`SELECT status, body_text FROM examples WHERE message_id = 'm1'`)).toEqual({ status: 'gone', body_text: null });
   });
 
-  it('takes the text kept while the mail waited, and fetches only what was not kept', async () => {
+  it('takes the text Sift read, and reads only what it never read', async () => {
     await suggest('news@example.com', 'archive', NEWS); // m1: kept
     await suggest('news@example.com', 'archive', NEWS); // m2: gone from Gmail when its text was fetched
-    await keepSuggestionBodies(
+    await keepWaitingText(
       db,
-      { getContent: async (id) => (id === 'm2' ? null : { text: `Text of ${id}`, html: `<p>${id}</p>`, facts: { hasAttachments: false } }) },
+      readingOnce(db, ACCOUNT, {
+        getContent: async (id) => (id === 'm2' ? null : { text: `Text of ${id}`, html: `<p>${id}</p>`, facts: { hasAttachments: false } }),
+      }),
       ACCOUNT,
       () => 1000,
     );
@@ -609,7 +620,8 @@ describe('examples', () => {
       { getContent: async (id) => (fetched.push(id), id === 'm2' ? null : { text: 'Hi', html: null, facts: { hasAttachments: false } }) },
       ACCOUNT,
     );
-    expect(fetched).toEqual(['m2', 'm3']);
+    // m2 was read once and had gone; only m3 was never read.
+    expect(fetched).toEqual(['m3']);
     expect(await raw(db).get(`SELECT status FROM examples WHERE message_id = 'm2'`)).toEqual({ status: 'gone' });
   });
 

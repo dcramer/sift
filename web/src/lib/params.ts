@@ -1,6 +1,7 @@
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { useStarted } from '@/system/started.ts';
+import { isStale } from './build.ts';
 
 /** A message as a list's rows name it (`holds`), which is how the panel finds its way back to one. */
 export const messageKey = (m: { accountId: string; messageId: string }) => `${m.accountId}/${m.messageId}`;
@@ -10,12 +11,25 @@ const PROPOSAL = 'proposal/';
 /** A proposal as For review's list names it, for hiding it while its dismissal is on its way. */
 export const proposalKey = (p: { id: number }) => `${PROPOSAL}${p.id}`;
 
-export const isMessageKey = (key: string) => !key.startsWith(PROPOSAL);
+const THREAD = 'thread/';
 
-/** The marks this page puts on a history entry: a panel opened over a list, which Back closes. */
+/** A conversation as Inbox's list names it, for hiding it while its archive is on its way. */
+export const threadKey = (t: { accountId: string; threadId: string }) => `${THREAD}${t.accountId}/${t.threadId}`;
+
+export const isMessageKey = (key: string) => !key.startsWith(PROPOSAL) && !key.startsWith(THREAD);
+
+/** The marks this page puts on a history entry: a panel opened over a list, or a layer over the page, which Back closes. */
 interface Marks {
   panel?: boolean;
+  layer?: string;
 }
+
+const layerOn = () => ((window.history.state ?? {}) as Marks).layer;
+/** Layers' entries a press has handed to wherever it goes next, which takes the entry's place (`handOver`). */
+const handed = new Set<string>();
+let layers = 0;
+/** The entry of a layer just closed, until it is taken off or another layer opening in the same draw takes it over. */
+let releasing: string | null = null;
 
 // The query this page last wrote, for the path it wrote it on. Read in its place, since a browser may refuse to
 // rewrite the address too often (Safari, while someone types in a search box) and the page must still follow.
@@ -33,7 +47,17 @@ const subscribe = (listener: () => void) => {
     window.removeEventListener('popstate', listener);
   };
 };
-if (typeof window !== 'undefined') window.addEventListener('popstate', () => (wrote = null));
+/** The query of a layer's entry being taken off, for the entry under it (`leaveLayer`). */
+let carrying: string | null = null;
+// Registered as this module loads, so it runs before Next.js and the page follow the address: what a layer's entry
+// was given reaches the entry under it before anything draws from that entry's own, which may name the layer again.
+if (typeof window !== 'undefined')
+  window.addEventListener('popstate', () => {
+    wrote = null;
+    const query = carrying;
+    carrying = null;
+    if (query !== null && query !== window.location.search) goToQuery(query.slice(1));
+  });
 
 /**
  * Go to `query` on this path, through the History API, which Next.js follows (`useSearchParams`) without asking the
@@ -42,12 +66,16 @@ if (typeof window !== 'undefined') window.addEventListener('popstate', () => (wr
  */
 export function goToQuery(query: string, push?: { state: Marks | null }, path = window.location.pathname) {
   const to = path + (query ? `?${query}` : '');
-  wrote = { path, query };
   // Only this page's own marks: Next.js adds its own to whatever it is given, and does not follow a write that already carries them.
-  const { panel } = (window.history.state ?? {}) as Marks;
+  // A layer's entry rewritten for another path is that path's now, and closing the layer leaves it; a query written
+  // to it is carried down as the layer closes (`leaveLayer`).
+  const { panel, layer } = (window.history.state ?? {}) as Marks;
+  const kept = { ...(panel ? { panel } : {}), ...(layer && path === window.location.pathname ? { layer } : {}) };
+  const take = push !== undefined && layer !== undefined && handed.delete(layer);
+  wrote = { path, query };
   try {
-    if (push) window.history.pushState(push.state, '', to);
-    else window.history.replaceState(panel ? { panel } : null, '', to);
+    if (push && !take) window.history.pushState(push.state, '', to);
+    else window.history.replaceState(take ? push.state : Object.keys(kept).length ? kept : null, '', to);
   } catch {
     // The address is behind; the page is not.
   }
@@ -90,15 +118,84 @@ export const rulePath = (id: string, apply = false) => `/rules/${encodeURICompon
 
 /** Opens a rule at its address from anywhere: in place on the Rules list, else by going there, so Back returns. */
 export function useOpenRule(): (id: string, apply?: boolean) => void {
-  const router = useRouter();
+  const go = useGo();
   return (id, apply = false) => {
     if (window.location.pathname.split('/')[1] === 'rules') openIn('rules', id, { apply: apply ? '1' : '' });
-    else router.push(rulePath(id, apply));
+    else go(rulePath(id, apply));
   };
 }
 
 /** One value in the address's query now, for code that runs after a press, outside rendering. */
 export const paramNow = (name: string) => new URLSearchParams(current()).get(name) ?? '';
+
+/**
+ * While `open`, a history entry of its own for a layer over the page (a dialog, the phone's menu), so Back (Android's,
+ * the browser's) closes it, through `close`, instead of leaving the page. Closed any other way its entry is taken off
+ * again, unless a press handed it on (`handOver`).
+ */
+export function useBackCloses(open: boolean, close: () => void) {
+  const latest = useRef(close);
+  useEffect(() => {
+    latest.current = close;
+  });
+  useEffect(() => {
+    if (!open) return;
+    // A layer that opens as another closes, in the same draw (a dialog's next step, or the same one drawn again by
+    // React's StrictMode), takes over its entry: going back and adding another would race, and Back could take the new one.
+    const id = releasing !== null && layerOn() === releasing ? releasing : `layer-${++layers}`;
+    releasing = null;
+    if (layerOn() !== id) window.history.pushState({ ...window.history.state, layer: id }, '', window.location.href);
+    let popped = false;
+    const back = () => {
+      if (layerOn() === id) return;
+      popped = true;
+      latest.current();
+    };
+    window.addEventListener('popstate', back);
+    return () => {
+      window.removeEventListener('popstate', back);
+      if (popped) return;
+      releasing = id;
+      queueMicrotask(() => {
+        if (releasing !== id) return;
+        releasing = null;
+        if (layerOn() === id && !handed.delete(id)) leaveLayer();
+      });
+    };
+  }, [open]);
+}
+
+/**
+ * Takes a layer's entry off by going back to the one under it, which then gets whatever was written to the layer's
+ * meanwhile (a press that closed it and opened something in the address): going back alone would undo that.
+ */
+function leaveLayer() {
+  carrying = window.location.search;
+  window.history.back();
+}
+
+/**
+ * A press in a layer that goes somewhere as the layer closes (a section in the menu, Settings): where it goes takes the
+ * layer's entry, so Back from there returns to the page under the layer, not to a copy of it.
+ */
+export function handOver() {
+  const layer = layerOn();
+  if (layer) handed.add(layer);
+}
+
+/**
+ * Go to another screen: without loading the page, unless Sift was updated since it was loaded (`isStale`). From a
+ * layer's entry it replaces it: the screen goes with the layer.
+ */
+export function useGo(): (href: string) => void {
+  const router = useRouter();
+  return (href) => {
+    const layer = layerOn();
+    if (layer) handed.add(layer);
+    if (isStale()) window.location[layer ? 'replace' : 'assign'](href);
+    else router[layer ? 'replace' : 'push'](href);
+  };
+}
 
 /** Whether the entry the page is on was added by opening a panel, so Back closes it. */
 export const panelEntry = () => ((window.history.state ?? {}) as Marks).panel === true;

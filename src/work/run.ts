@@ -2,7 +2,7 @@ import type { Sql } from '../store/sql.ts';
 import { reconcile, reconcileDue } from '../actions/executor.ts';
 import type { Mailbox } from '../actions/mailbox.ts';
 import type { GmailApi } from '../gmail/api.ts';
-import type { MessageContent } from '../gmail/body.ts';
+import { READ_KEEP_DAYS, indexKept, purgeRead, searchDue } from '../store/kept.ts';
 import type { FilterCheck } from '../actions/rule-filters.ts';
 import type { UnsubscribeOutcome } from '../actions/unsubscribe.ts';
 import type { Judge } from '../triage/stages/model.ts';
@@ -11,15 +11,18 @@ import type { Ephemeral } from '../ephemeral/ephemeral.ts';
 import { type Account, lastSyncedAt, listAccounts, listUsers, mailboxesOf, signInEnded, signInHeld } from '../store/accounts.ts';
 import type { Store } from '../store/store.ts';
 import { EXAMPLE_KEEP_DAYS, pruneExamples } from '../store/examples.ts';
-import { latestArrival, listUndecided, purgeSuggestionBodies } from '../store/messages.ts';
+import { latestArrival, listUndecided } from '../store/messages.ts';
 import { listUnsettledDecisions } from '../store/decisions.ts';
 import { preferences } from '../store/preferences.ts';
-import { KEEP_BODY_DAYS, bodiesDue, keepSuggestionBodies } from './bodies.ts';
+import { bodiesDue, keepMailBodies, keepWaitingText, mailBodiesDue, readingOnce } from './bodies.ts';
 import { captureExamples, examplesDue } from './examples.ts';
 import { PRUNE_PER_RUN, RETENTION_DAYS, pruneOld } from './retention.ts';
 import { continueEval, goingEvals } from '../learn/evals.ts';
 import { hasOwnLabels } from '../store/labels.ts';
 import { continueInboxRun, continueRuleRun } from './inbox.ts';
+import { copyMail } from './copy.ts';
+import { dropTextBefore, goingCopies } from '../store/copies.ts';
+import { windowStart } from '../mail-window.ts';
 import { goingInboxRun, goingInboxRuns } from '../store/inbox.ts';
 import { checkFiltersWhenDue, filtersDue } from './filters.ts';
 import { type PassStatus, lastPass, recordPassStatus } from './status.ts';
@@ -54,6 +57,8 @@ export interface PassResult {
   triage?: TriageReport;
   /** Marked messages whose full content was stored this pass. */
   captured?: number;
+  /** Messages whose text was kept before there was a search index, indexed this pass. */
+  indexed?: number;
   /** What a look at the account's Gmail filters found, on the passes that looked. */
   filters?: FilterCheck;
   error?: string;
@@ -62,6 +67,12 @@ export interface PassResult {
   /** Stopped at its time limit with work left. */
   unfinished?: true;
 }
+
+/**
+ * Text kept before there was a search index, indexed by each pass: about 3 seconds of a pass, so 100,000 messages take
+ * 100 passes, which the look begins one a minute while any is left (`searchDue`).
+ */
+const INDEX_PER_PASS = 1_000;
 
 /** Whether a person is still there: one deleted while a pass ran is skipped, not reported. */
 const stillThere = async (store: Store, id: number) => (await listUsers(store.central)).some((u) => u.id === id);
@@ -84,6 +95,7 @@ export type Work =
   | { kind: 'pass'; person: number; mailbox: number }
   | { kind: 'upkeep'; person: number }
   | { kind: 'inbox'; person: number; mailbox: number; run: number }
+  | { kind: 'copy'; person: number; mailbox: number }
   | { kind: 'eval'; person: number; run: number }
   | { kind: 'digest'; person: number };
 
@@ -103,11 +115,15 @@ export async function dueWork(store: Store, options: RunOptions, people?: readon
     // Nothing is read from their Gmail until the person has said, with a label of their own, what they want of it.
     const reading = await hasOwnLabels(db);
     const evals = await goingEvals(db);
+    const copies = (await preferences(db)).mail ? await goingCopies(db) : [];
     // Going through an inbox and a test run wait for a model, so the timed tick begins neither without one. Applying a rule needs none.
     const modelled = Boolean(people) || ((runs.some((run) => !run.ruleId) || evals.length > 0) && Boolean(options.model && (await options.model(db))));
     for (const account of await listAccounts(db)) {
       if (!reading) continue;
       if (people || (await passWanted(db, account, options))) due.push({ kind: 'pass', person, mailbox: account.number });
+      // An expired sign-in fails a copy as it fails a pass.
+      if (copies.some((c) => c.accountId === account.id) && (people || !(await lastPass(options.ephemeral, account.id))?.expired))
+        due.push({ kind: 'copy', person, mailbox: account.number });
       const going = runs.filter((run) => run.accountId === account.id && (run.ruleId || modelled));
       // An expired sign-in fails a slice as it fails a pass; the look above finds when Gmail answers again.
       if (going.length === 0 || (!people && (await lastPass(options.ephemeral, account.id))?.expired)) continue;
@@ -124,11 +140,13 @@ export const describeWork = (work: Work) =>
     ? `Mailbox ${work.mailbox}: pass`
     : work.kind === 'inbox'
       ? `Mailbox ${work.mailbox}: inbox run ${work.run}`
-      : work.kind === 'eval'
-        ? 'A test run'
-        : work.kind === 'digest'
-          ? 'Daily digests'
-          : 'Deleting old records';
+      : work.kind === 'copy'
+        ? `Mailbox ${work.mailbox}: copying mail for Inbox`
+        : work.kind === 'eval'
+          ? 'A test run'
+          : work.kind === 'digest'
+            ? 'Daily digests'
+            : 'Deleting old records';
 
 /**
  * Run one piece of due work, starting nothing after `until`. Everything it touches is opened here from the
@@ -161,6 +179,15 @@ export const runWork = (store: Store, work: Work, options: RunOptions, until: nu
           return account ? await passMailbox(db, account, options, until) : null;
         case 'inbox':
           if (account) await goThroughInbox(db, account, work.run, options, until);
+          return null;
+        case 'copy':
+          if (account) {
+            const copied = await copyMail(
+              { db, api: (await options.connect(db, account)).api, until, ...(options.now ? { now: options.now } : {}) },
+              account.id,
+            );
+            if (copied) options.log(`${account.email}: copied ${copied} message${copied === 1 ? '' : 's'} for Inbox`);
+          }
           return null;
         case 'eval': {
           const tier = options.model ? await options.model(db) : null;
@@ -206,28 +233,6 @@ async function digests(store: Store, db: Sql, person: number, options: RunOption
 }
 
 /**
- * Gmail for one pass, reading each message whole at most once: the model, the examples and the bodies kept
- * for waiting mail share the read. `held` says which were read; a read that failed is asked for again. Held only for the pass.
- */
-function readingOnce(api: GmailApi): { api: GmailApi; held: (messageId: string) => boolean } {
-  const reads = new Map<string, Promise<MessageContent | null>>();
-  const done = new Set<string>();
-  const getContent = (messageId: string) => {
-    let read = reads.get(messageId);
-    if (!read) {
-      read = api.getContent(messageId);
-      reads.set(messageId, read);
-      read.then(
-        () => done.add(messageId),
-        () => reads.delete(messageId),
-      );
-    }
-    return read;
-  };
-  return { api: { ...api, getContent }, held: (messageId) => done.has(messageId) };
-}
-
-/**
  * Go on with an inbox run over one mailbox. Applying a rule needs no model: it takes back what Sift did to the
  * mail it replaces, and the pass carries out what it records. Going through the inbox uses what a pass would:
  * its model, Gmail read once per message, and the mailbox only while Sift is on. Without a model it waits; deciding only what rules cover would leave the rest behind it.
@@ -244,7 +249,7 @@ async function goThroughInbox(db: Sql, account: Account, run: number, options: R
   const { active } = await preferences(db);
   const leave = options.unsubscribe;
   const { api: gmail, mailbox } = await options.connect(db, account);
-  const { api, held } = readingOnce(gmail);
+  const api = { ...gmail, ...readingOnce(db, account.id, gmail, options.now) };
   const went = await continueInboxRun(
     {
       db,
@@ -260,8 +265,6 @@ async function goThroughInbox(db: Sql, account: Account, run: number, options: R
     account,
     run,
   );
-  // The text the model read is kept for what is now waiting on the person; the rest waits for a pass.
-  await keepSuggestionBodies(db, api, account.id, options.now, { held, fetch: false });
   if (went && went.to > went.from) options.log(`${account.email}: went through ${went.to} of ${went.of} in the inbox`);
 }
 
@@ -320,6 +323,8 @@ async function recordWants(db: Sql, account: Account, options: RunOptions, now: 
   if (active && (await reconcileDue(db, account.id))) return true;
   if ((await listUnsettledDecisions(db, account.id, active ? {} : { byUserOnly: true })).length > 0) return true;
   if (await bodiesDue(db, account.id, now)) return true;
+  if (await mailBodiesDue(db, account.id)) return true;
+  if (await searchDue(db, account.id)) return true;
   if (await examplesDue(db, account.id)) return true;
   if (await filtersDue(db, account.id, active, now)) return true;
   // With no model, what no rule covers waits for one and a pass leaves it be. A rule added since decides it at the next
@@ -339,13 +344,14 @@ async function runMailbox(db: Sql, account: Account, options: RunOptions, until:
   const result: PassResult = { email: account.email };
   try {
     const { api: gmail, mailbox } = await options.connect(db, account);
-    const { api, held } = readingOnce(gmail);
+    // Every read of a message's text in the pass goes through this, so each is read from Gmail once and kept.
+    const api = { ...gmail, ...readingOnce(db, account.id, gmail, options.now) };
     const deps = { db, mailbox, ...(options.now ? { now: options.now } : {}) };
     if (active) await reconcile(deps, { accountId: account.id });
     result.sync = await syncAccount(db, api, account, options.now, until);
     if (result.sync.unfinished) return finish(result, active, options, true);
-    // Before triage, which takes every pass there is while a backlog lasts: fetched only after it, mail left waiting would never get its text.
-    await keepSuggestionBodies(db, api, account.id, options.now, { fetch: !over() });
+    // Before triage, which takes every pass there is while a backlog lasts: read only after it, mail left waiting would never get its text.
+    if (!over()) await keepWaitingText(db, api, account.id, options.now);
     result.triage = await triageAccount(
       {
         ...deps,
@@ -358,10 +364,13 @@ async function runMailbox(db: Sql, account: Account, options: RunOptions, until:
       },
       account,
     );
-    const out = Boolean(result.triage.unfinished) || over();
-    // Out of time, the text the model read is still kept for the mail it left waiting; the rest waits for the next pass.
-    await keepSuggestionBodies(db, api, account.id, options.now, { held, fetch: !out });
-    if (out) return finish(result, active, options, true);
+    if (result.triage.unfinished || over()) return finish(result, active, options, true);
+    await keepWaitingText(db, api, account.id, options.now);
+    // After triage, unlike waiting mail's: Inbox shows mail as it is, so classifying comes first.
+    await keepMailBodies(db, api, account.id, options.now);
+    if (over()) return finish(result, active, options, true);
+    result.indexed = await indexKept(db, account.id, INDEX_PER_PASS, over);
+    if (over()) return finish(result, active, options, true);
     result.captured = await captureExamples(db, api, account.id);
     try {
       const filters = await checkFiltersWhenDue(deps, account.id, active);
@@ -402,6 +411,7 @@ function describe(result: PassResult, active: boolean): string | null {
   const { sync, triage } = result;
   if (sync?.mode === 'recovery') parts.push('history cursor had expired, searched the last 7 days');
   if (sync && sync.added.length > 0) parts.push(`${sync.added.length} new`);
+  if (sync?.kept) parts.push(`${sync.kept} more kept for Inbox`);
   if (sync?.corrections) parts.push(`learned from ${sync.corrections} message${sync.corrections === 1 ? '' : 's'} you moved or relabelled in Gmail`);
   if (triage) {
     const decided = Object.entries(triage.decided).filter(([, n]) => n > 0);
@@ -414,6 +424,7 @@ function describe(result: PassResult, active: boolean): string | null {
     if (triage.retrying > 0) parts.push(`${triage.retrying} change${triage.retrying === 1 ? '' : 's'} to try again`);
     if (triage.troubled > 0) parts.push(`${triage.troubled} change${triage.troubled === 1 ? '' : 's'} not made after ${CHANGE_TRIES} tries`);
   }
+  if (result.indexed) parts.push(`indexed ${result.indexed} kept message${result.indexed === 1 ? '' : 's'} for search`);
   if (result.captured) parts.push(`stored ${result.captured} marked message${result.captured === 1 ? '' : 's'} as examples`);
   if (result.unfinished) parts.push('out of time, carrying on');
   const { filters } = result;
@@ -429,10 +440,14 @@ export async function upkeep(db: Sql, options: Pick<RunOptions, 'log' | 'now'>):
   const now = (options.now ?? Date.now)();
   const dropped = await pruneExamples(db, now);
   if (dropped > 0) options.log(`Deleted ${dropped} example${dropped === 1 ? '' : 's'} older than ${EXAMPLE_KEEP_DAYS} days`);
-  await purgeSuggestionBodies(db, now - KEEP_BODY_DAYS * DAY_MS);
+  await purgeRead(db, now - READ_KEEP_DAYS * DAY_MS);
   let pruned: number;
   do {
     pruned = await pruneOld(db, now);
     if (pruned > 0) options.log(`Forgot ${pruned} message${pruned === 1 ? '' : 's'} with nothing newer than ${RETENTION_DAYS} days`);
   } while (pruned >= PRUNE_PER_RUN);
+  // A record that a recent decision or change keeps past Inbox's window keeps no text.
+  const { mail, mailWindow } = await preferences(db);
+  const since = mail ? windowStart(mailWindow, now) : null;
+  if (since !== null) await dropTextBefore(db, since);
 }

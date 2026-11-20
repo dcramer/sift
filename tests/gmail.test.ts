@@ -42,6 +42,15 @@ function fakeApi(fake: Fake): GmailApi & { calls: string[] } {
     async inboxSize() {
       return fake.search?.length ?? 0;
     },
+    async searchMail() {
+      return { ids: [] };
+    },
+    async mailboxSize() {
+      return 0;
+    },
+    async getMessage() {
+      return null;
+    },
     async getMetadata(id) {
       return fake.messages?.[id] ?? null;
     },
@@ -67,11 +76,11 @@ function fakeApi(fake: Fake): GmailApi & { calls: string[] } {
 describe('pullChanges', () => {
   it('only records the current position on first run', async () => {
     const api = fakeApi({ historyId: '500' });
-    expect(await pullChanges(api, null)).toEqual({ messageIds: [], labelChanges: [], strays: [], historyId: '500', mode: 'start' });
+    expect(await pullChanges(api, null)).toEqual({ messageIds: [], labelChanges: [], strays: [], elsewhere: [], deleted: [], historyId: '500', mode: 'start' });
     expect(api.calls).toEqual(['profile']);
   });
 
-  it('pages through history, keeps inbox arrivals and deduplicates', async () => {
+  it('pages through history, keeps inbox arrivals and deduplicates, and keeps mail added elsewhere apart', async () => {
     const api = fakeApi({
       pages: {
         '': {
@@ -87,11 +96,20 @@ describe('pullChanges', () => {
             { id: 'a', labelIds: ['INBOX'] },
             { id: 'b', labelIds: ['INBOX', 'UNREAD'] },
           ],
+          deleted: ['old'],
           historyId: '520',
         },
       },
     });
-    expect(await pullChanges(api, '500')).toEqual({ messageIds: ['a', 'b'], labelChanges: [], strays: [], historyId: '520', mode: 'incremental' });
+    expect(await pullChanges(api, '500')).toEqual({
+      messageIds: ['a', 'b'],
+      labelChanges: [],
+      strays: [],
+      elsewhere: ['sent'],
+      deleted: ['old'],
+      historyId: '520',
+      mode: 'incremental',
+    });
     expect(api.calls).toEqual(['history:500:', 'history:500:p2']);
   });
 
@@ -102,12 +120,28 @@ describe('pullChanges', () => {
       { messageId: 'a', added: ['INBOX'], removed: [] },
     ];
     const api = fakeApi({ pages: { '': { additions: [{ id: 'a', labelIds: ['INBOX'] }], labelChanges, unexplained: ['quiet', 'quiet'], historyId: '510' } } });
-    expect(await pullChanges(api, '500')).toEqual({ messageIds: ['a'], labelChanges, strays: ['quiet', 'back'], historyId: '510', mode: 'incremental' });
+    expect(await pullChanges(api, '500')).toEqual({
+      messageIds: ['a'],
+      labelChanges,
+      strays: ['quiet', 'back'],
+      elsewhere: [],
+      deleted: [],
+      historyId: '510',
+      mode: 'incremental',
+    });
   });
 
   it('falls back to a bounded search when the cursor has expired, reading the new cursor first', async () => {
     const api = fakeApi({ expired: true, historyId: '900', search: ['new', 'old'] });
-    expect(await pullChanges(api, '1')).toEqual({ messageIds: ['old', 'new'], labelChanges: [], strays: [], historyId: '900', mode: 'recovery' });
+    expect(await pullChanges(api, '1')).toEqual({
+      messageIds: ['old', 'new'],
+      labelChanges: [],
+      strays: [],
+      elsewhere: [],
+      deleted: [],
+      historyId: '900',
+      mode: 'recovery',
+    });
     expect(api.calls).toEqual(['history:1:', 'profile', 'search:newer_than:7d']);
   });
 
@@ -137,7 +171,15 @@ describe('pullChanges', () => {
       searchPages: { '': { ids: ['d', 'c'], nextPageToken: 's2' }, s2: { ids: ['c', 'b', 'a'] } },
     });
     // What the first history page said is dropped: the search covers it, and the cursor is the profile's.
-    expect(await pullChanges(api, '500')).toEqual({ messageIds: ['a', 'b', 'c', 'd'], labelChanges: [], strays: [], historyId: '900', mode: 'recovery' });
+    expect(await pullChanges(api, '500')).toEqual({
+      messageIds: ['a', 'b', 'c', 'd'],
+      labelChanges: [],
+      strays: [],
+      elsewhere: [],
+      deleted: [],
+      historyId: '900',
+      mode: 'recovery',
+    });
     expect(api.calls).toEqual(['history:500:', 'history:500:p2', 'profile', 'search:newer_than:7d', 'search:newer_than:7d:s2']);
   });
 

@@ -3,7 +3,7 @@ import { CodeChallengeMethod, OAuth2Client } from 'google-auth-library';
 import type { Config, Env } from '../config.ts';
 import { readSecret, writeSecret } from '../secrets.ts';
 import { readProfile } from './api.ts';
-import { GMAIL_SCOPES } from './scopes.ts';
+import { GMAIL_SCOPES, SEND_SCOPE } from './scopes.ts';
 
 interface ClientSecrets {
   clientId: string;
@@ -61,13 +61,19 @@ export function clientFor(secrets: ClientSecrets, refreshToken: string): OAuth2C
   return client;
 }
 
-/** Where to send the browser so Google can sign the user in and grant sift its Gmail access, in one step. */
-export function browserSignInUrl(secrets: ClientSecrets, request: { redirectUri: string; state: string; challenge: string }): string {
+/**
+ * Where to send the browser so Google can sign the user in and grant sift its Gmail access, in one step. `send`: a connected
+ * mailbox to let Sift send from, which Google is asked for that alone, on top of what it has granted.
+ */
+export function browserSignInUrl(secrets: ClientSecrets, request: { redirectUri: string; state: string; challenge: string; send: string | null }): string {
   return new OAuth2Client({ clientId: secrets.clientId, clientSecret: secrets.clientSecret, redirectUri: request.redirectUri }).generateAuthUrl({
     access_type: 'offline',
     // Always ask, so Google returns a refresh token every time.
     prompt: 'consent',
-    scope: [...GMAIL_SCOPES],
+    scope: request.send === null ? [...GMAIL_SCOPES] : [SEND_SCOPE],
+    // Signing in again keeps sending where it was granted, and a grant to send keeps what was granted before it.
+    include_granted_scopes: true,
+    ...(request.send === null ? {} : { login_hint: request.send }),
     state: request.state,
     code_challenge: request.challenge,
     code_challenge_method: CodeChallengeMethod.S256,
@@ -78,13 +84,18 @@ export function browserSignInUrl(secrets: ClientSecrets, request: { redirectUri:
 export async function completeBrowserSignIn(
   secrets: ClientSecrets,
   request: { redirectUri: string; code: string; verifier: string },
-): Promise<{ email: string; historyId: string; refreshToken: string }> {
+): Promise<{ email: string; historyId: string; refreshToken: string; canSend: boolean }> {
   const client = new OAuth2Client({ clientId: secrets.clientId, clientSecret: secrets.clientSecret, redirectUri: request.redirectUri });
   const { tokens } = await client.getToken({ code: request.code, codeVerifier: request.verifier, redirect_uri: request.redirectUri });
   if (!tokens.refresh_token) throw new Error('Google did not return a refresh token.');
   client.setCredentials(tokens);
   const profile = await readProfile(client);
-  return { email: profile.emailAddress, historyId: profile.historyId, refreshToken: tokens.refresh_token };
+  return {
+    email: profile.emailAddress,
+    historyId: profile.historyId,
+    refreshToken: tokens.refresh_token,
+    canSend: (tokens.scope ?? '').split(' ').includes(SEND_SCOPE),
+  };
 }
 
 /**

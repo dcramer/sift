@@ -19,6 +19,7 @@ import {
   bigint,
   boolean,
   check,
+  customType,
   doublePrecision,
   foreignKey,
   index,
@@ -33,13 +34,17 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { REASONING } from '../model/reasoning.ts';
+import { MAIL_WINDOWS } from '../mail-window.ts';
 import type { Facts } from '../triage/facts.ts';
 import { DECIDED, DISPOSITIONS, LEAVE_IN_INBOX, STAGE_NAMES, SUBSCRIPTION_ACTIONS } from '../triage/types.ts';
 
 export const CREDENTIAL_KINDS = ['gmail', 'model'] as const;
 export const DECISION_OUTCOMES = ['none', 'done', 'skipped', 'failed', 'unknown'] as const;
-/** `digest`: a digest put into the mailbox, which changes no message Sift recorded. */
-export const ACTION_TYPES = ['archive', 'spam', 'label', 'undo', 'unsubscribe', 'filter', 'unfilter', 'digest'] as const;
+/**
+ * `digest`: a digest put into the mailbox, which changes no message Sift recorded. `send`: mail the person sent through Sift.
+ * `read` and `unread`: the person's own press in Inbox, as is an `archive` with no decision.
+ */
+export const ACTION_TYPES = ['archive', 'spam', 'label', 'undo', 'unsubscribe', 'filter', 'unfilter', 'digest', 'send', 'read', 'unread'] as const;
 export const ACTION_STATUSES = ['pending', 'done', 'failed', 'unknown', 'undone'] as const;
 /** `learned`: sift made it (blocking a sender). */
 export const RULE_SOURCES = ['user', 'learned', 'correction'] as const;
@@ -66,6 +71,7 @@ const oneOf = (name: string, column: AnyPgColumn, values: readonly string[]): Re
 
 /** Milliseconds since the epoch. */
 const time = (name: string) => bigint(name, { mode: 'number' });
+const bytes = customType<{ data: Uint8Array; driverData: Uint8Array }>({ dataType: () => 'bytea' });
 const id = () => integer('id').primaryKey().generatedByDefaultAsIdentity();
 const userId = () =>
   integer('user_id')
@@ -126,6 +132,7 @@ export const mailboxes = pgTable(
     lastSyncedAt: time('last_synced_at'),
     filtersCheckedAt: time('filters_checked_at'),
     aliases: jsonb('aliases').$type<string[]>().notNull().default([]), // Gmail send-as addresses besides the id, as of the last sync that could read them
+    canSend: boolean('can_send').notNull().default(false), // Google granted `gmail.send` to the sign-in Sift holds for it
     signedInAt: time('signed_in_at'), // when its Gmail sign-in was given; null for one given before this was kept
     weeklySignIn: boolean('weekly_sign_in').notNull().default(false), // Google ended its last sign-in a week after it was given: the client is in Testing
   },
@@ -147,12 +154,21 @@ export const preferences = pgTable(
     userId: userId().primaryKey(),
     // false (off): their decisions are only suggestions. true (on): sift carries them out in their mailboxes.
     active: boolean('active').notNull().default(false),
+    // Inbox: Sift keeps a copy of their mail (`messages`, `mail_bodies`), and may send as them where a mailbox lets it.
+    mail: boolean('mail').notNull().default(false),
+    // How far back that copy goes.
+    mailWindow: text('mail_window', { enum: MAIL_WINDOWS }).notNull().default('year'),
     model: text('model'),
     reasoning: text('reasoning', { enum: REASONING }).notNull().default('low'),
     digestHour: integer('digest_hour').notNull().default(7), // the hour of their day a label's digest arrives
     timeZone: text('time_zone'), // their browser's IANA zone, as last said; null: never said, so UTC
   },
-  (t) => [check('preferences_digest_hour', sql`${t.digestHour} BETWEEN 0 AND 23`), oneOf('preferences_reasoning', t.reasoning, REASONING), own()],
+  (t) => [
+    check('preferences_digest_hour', sql`${t.digestHour} BETWEEN 0 AND 23`),
+    oneOf('preferences_reasoning', t.reasoning, REASONING),
+    oneOf('preferences_mail_window', t.mailWindow, MAIL_WINDOWS),
+    own(),
+  ],
 ).enableRLS();
 
 /**
@@ -184,13 +200,15 @@ export const messages = pgTable(
     receivedAt: time('received_at').notNull(),
     // The headers Gmail was asked for (METADATA_HEADERS), sender, recipients and subject among them, as encrypted JSON (src/store/content.ts).
     headers: text('headers').notNull(),
-    labelIds: jsonb('label_ids').$type<string[]>().notNull().default([]), // when synced; a snapshot, not current state
+    // As the last sync read them from Gmail's history; stale for what changed while its cursor had expired (`recovery`).
+    labelIds: jsonb('label_ids').$type<string[]>().notNull().default([]),
     syncedAt: time('synced_at').notNull(),
     suggestOnly: boolean('suggest_only').notNull().default(false), // first recorded by an inbox run that only suggests: a pass never carries it out
     applyRule: text('apply_rule'), // pulled in by "Apply to inbox" on this rule: what it decides here is carried out, Sift on or off
     facts: jsonb('facts').$type<Facts>().notNull(),
     readAt: time('read_at'), // when a sync saw the user had opened it
-    // A decision has been recorded for it (`recordDecision`). What has none is the triage queue, which a tick looks at every minute.
+    // A decision has been recorded for it (`recordDecision`), or it is not mail to triage: the person's own, or copied for Inbox
+    // (`recordKept`). What is neither is the triage queue, which a tick looks at every minute.
     decided: boolean('decided').notNull().default(false),
   },
   (t) => [
@@ -199,6 +217,11 @@ export const messages = pgTable(
     index('messages_sender').on(t.accountId, t.senderHash),
     index('messages_domain').on(t.accountId, t.domainHash),
     index('messages_received').on(t.accountId, t.receivedAt),
+    index('messages_thread').on(t.userId, t.accountId, t.threadId),
+    // What is in the inbox now, newest first: what Inbox lists and what a pass keeps the text of while it is on.
+    index('messages_inbox')
+      .on(t.accountId, t.receivedAt)
+      .where(sql`${t.labelIds} @> '["INBOX"]'::jsonb`),
     index('messages_undecided')
       .on(t.accountId, t.receivedAt)
       .where(sql`NOT ${t.decided}`),
@@ -551,18 +574,69 @@ export const examples = pgTable(
   ],
 ).enableRLS();
 
-/** The readable text of mail waiting on the user. Deleted when it is answered or stops being a suggestion, and after 30 days. */
-export const suggestionBodies = pgTable(
-  'suggestion_bodies',
+/**
+ * The text of a message Sift read whole with Inbox off (for the model, for mail waiting on the person, for an example), kept 30
+ * days from reading whatever becomes of the message, so nothing reads it from Gmail again (`keepRead`, src/store/kept.ts).
+ */
+export const readBodies = pgTable(
+  'read_bodies',
   {
     userId: userId(),
     accountId: text('account_id').notNull(),
     messageId: text('message_id').notNull(),
-    bodyText: text('body_text').notNull(), // as the model is shown it: plain text, truncated
+    bodyText: text('body_text').notNull(), // all of its readable text, up to `MAX_MAIL_CHARS` (src/gmail/body.ts); before 0070, the model's 4,000
     bodyHtml: text('body_html'), // its HTML part as Gmail holds it, cleaned only when shown; null when it has none
     fetchedAt: time('fetched_at').notNull(),
   },
   (t) => [primaryKey({ columns: [t.userId, t.accountId, t.messageId] }), mailbox(t), message(t), own()],
+).enableRLS();
+
+/**
+ * The text of mail in the inbox, all of it, for Inbox to show: held only while the person has Inbox on, and deleted with
+ * the rest when they turn it off. Mail that left the inbox keeps its text while its record stays.
+ */
+export const mailBodies = pgTable(
+  'mail_bodies',
+  {
+    userId: userId(),
+    accountId: text('account_id').notNull(),
+    messageId: text('message_id').notNull(),
+    bodyText: text('body_text').notNull(), // all of its readable text, up to `MAX_MAIL_CHARS` (src/gmail/body.ts)
+    bodyHtml: text('body_html'), // its HTML part as Gmail holds it, cleaned only when shown; null when it has none
+    fetchedAt: time('fetched_at').notNull(),
+    // What search finds it by: a keyed Bloom filter of its words, its sender's and its subject's (src/store/search.ts).
+    // Null until the pass indexes text kept before there was one. Kept in the row (STORAGE MAIN), where a search scans it.
+    search: bytes('search'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.accountId, t.messageId] }),
+    mailbox(t),
+    message(t),
+    index('mail_bodies_unindexed')
+      .on(t.userId, t.accountId)
+      .where(sql`${t.search} IS NULL`),
+    own(),
+  ],
+).enableRLS();
+
+/**
+ * Copying a mailbox for Inbox: its mail received from `since` (null: all of it) to `before`, and what is in its inbox, listed
+ * newest first a page at a time, each message recorded with its text (`copyMail`, src/work/copy.ts). One a mailbox.
+ */
+export const mailCopies = pgTable(
+  'mail_copies',
+  {
+    userId: userId(),
+    accountId: text('account_id').notNull(),
+    since: time('since'),
+    before: time('before').notNull(),
+    pageToken: text('page_token'), // where the page under way starts in Gmail's listing; null: at the top
+    done: integer('done').notNull().default(0), // listed and recorded, in this listing
+    total: integer('total').notNull().default(0), // Gmail's estimate of what the listing holds, from its first page
+    startedAt: time('started_at').notNull(),
+    finishedAt: time('finished_at'), // null while it goes on
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.accountId] }), mailbox(t), own()],
 ).enableRLS();
 
 /** A replay of the model over stored examples, with the settings it ran with: the same hashes mean the model was asked the same way. */
@@ -664,6 +738,27 @@ export const ruleDrafts = pgTable(
     costUsd: doublePrecision('cost_usd').notNull().default(0),
   },
   (t) => [unique('rule_drafts_own').on(t.userId, t.id), mailbox(t), index('rule_drafts_time').on(t.accountId, t.startedAt), own()],
+).enableRLS();
+
+/** One row per Ask in Inbox's search: the person's words turned into a filter on the list by their model. */
+export const mailAsks = pgTable(
+  'mail_asks',
+  {
+    id: id(),
+    userId: userId(),
+    accountId: text('account_id').notNull(),
+    startedAt: time('started_at').notNull(),
+    finishedAt: time('finished_at'),
+    model: text('model').notNull(),
+    words: text('words').notNull(), // encrypted, as a rule draft's goal
+    answer: text('answer'), // the filter, or why there is none, encrypted JSON
+    lookups: integer('lookups').notNull().default(0),
+    error: text('error'), // its status and kind, never the provider's text
+    inputTokens: integer('input_tokens').notNull().default(0),
+    outputTokens: integer('output_tokens').notNull().default(0),
+    costUsd: doublePrecision('cost_usd').notNull().default(0),
+  },
+  (t) => [unique('mail_asks_own').on(t.userId, t.id), mailbox(t), index('mail_asks_time').on(t.accountId, t.startedAt), own()],
 ).enableRLS();
 
 /** One row per example judged: labels and cost, no message content. */

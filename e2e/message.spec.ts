@@ -8,8 +8,9 @@ import {
   forReviewLink,
   messageQuery,
   openMessage,
-  panel,
-  panelHeading,
+  back,
+  reader,
+  readerHeading,
   toasts,
   param,
   path,
@@ -42,7 +43,7 @@ test.describe('A message as its HTML', () => {
   test('shows by default, and loads nothing from elsewhere', async ({ page, sift }) => {
     const sent = remote(page, sift.url);
     await page.goto(DEALS);
-    const open = panel(page);
+    const open = reader(page);
     await expect(open.getByRole('radio', { name: 'HTML' })).toBeChecked();
     await expect(open.getByText('Remote images are blocked')).toBeVisible();
     const frame = mailFrame(page, '48 hours only: 30% off');
@@ -64,13 +65,13 @@ test.describe('A message as its HTML', () => {
     const tab = await opened;
     await expect.poll(() => tab.url()).toBe('https://shop.example.com/sale');
     await tab.close();
-    await expect(panelHeading(page, '48 hours only: 30% off')).toBeVisible();
+    await expect(readerHeading(page, '48 hours only: 30% off')).toBeVisible();
     await param(page, 'message').toBe('m4');
   });
 
   test('Text, once chosen, is kept in the browser', async ({ page }) => {
     await page.goto(DEALS);
-    const open = panel(page);
+    const open = reader(page);
     await open.getByRole('radio', { name: 'Text' }).click();
     await expect(page.locator('iframe')).toHaveCount(0);
     await expect(open.getByText('Remote images are blocked')).toHaveCount(0);
@@ -78,21 +79,21 @@ test.describe('A message as its HTML', () => {
     expect(await page.evaluate(() => localStorage.getItem('sift:message-view'))).toBe('text');
 
     await page.reload();
-    await expect(panel(page).getByRole('radio', { name: 'Text' })).toBeChecked();
+    await expect(reader(page).getByRole('radio', { name: 'Text' })).toBeChecked();
     await expect(page.locator('iframe')).toHaveCount(0);
 
-    await panel(page).getByRole('radio', { name: 'HTML' }).click();
+    await reader(page).getByRole('radio', { name: 'HTML' }).click();
     await expect(mailFrame(page, '48 hours only: 30% off').getByRole('heading', { name: '30% off everything' })).toBeVisible();
   });
 
   test('mail held as text alone, or not held, has nothing to choose', async ({ page }) => {
     await page.goto(`/?${messageQuery('m6')}`);
-    await expect(panel(page).getByText('Are you free for lunch on Thursday?')).toBeVisible();
-    await expect(panel(page).getByRole('radiogroup', { name: 'Read it as' })).toHaveCount(0);
+    await expect(reader(page).getByText('Are you free for lunch on Thursday?')).toBeVisible();
+    await expect(reader(page).getByRole('radiogroup', { name: 'Read it as' })).toHaveCount(0);
 
     await page.goto(`/activity?show=all&${messageQuery('m1')}`);
-    await expect(panel(page).getByText('Sift does not hold this message’s text.')).toBeVisible();
-    await expect(panel(page).getByRole('radiogroup', { name: 'Read it as' })).toHaveCount(0);
+    await expect(reader(page).getByText('Sift does not hold this message’s text.')).toBeVisible();
+    await expect(reader(page).getByRole('radiogroup', { name: 'Read it as' })).toHaveCount(0);
   });
 
   test('fits a phone', async ({ page }) => {
@@ -123,12 +124,12 @@ test.describe('Who a message went to', () => {
     await expect(fewer).toHaveAttribute('aria-expanded', 'true');
     await expect(open.getByText(/reviewer12@example\.net Fewer$/)).toBeVisible();
 
-    // On a phone the header scrolls with the rest, so however long it is the whole panel can be read, and Close stays.
+    // The page scrolls as one, so however long the list is, what is under it can be read.
     const last = open.getByText(/^History · /);
     await last.scrollIntoViewIfNeeded();
     await expect(last).toBeInViewport();
-    await expect(panelHeading(page, 'Notes from the review')).not.toBeInViewport();
-    await expect(open.getByRole('button', { name: 'Close' })).toBeInViewport();
+    await expect(readerHeading(page, 'Notes from the review')).not.toBeInViewport();
+    await sideScroll(page).toBe(0);
     await fewer.scrollIntoViewIfNeeded();
 
     await fewer.click();
@@ -138,7 +139,7 @@ test.describe('Who a message went to', () => {
 
 test.describe('What Sift saw', () => {
   const seen = (page: Page) =>
-    panel(page)
+    reader(page)
       .getByRole('table')
       .filter({ has: page.getByRole('button', { name: /^Make a rule for mail that/ }) })
       .getByRole('rowgroup')
@@ -169,7 +170,7 @@ test.describe('What Sift saw', () => {
 
   test('a rule from a fact opens over the panel, and closing it leaves the panel open', async ({ page }) => {
     await page.goto(DEALS);
-    await panel(page).getByRole('button', { name: 'Make a rule for mail that has a one-click unsubscribe' }).click();
+    await reader(page).getByRole('button', { name: 'Make a rule for mail that has a one-click unsubscribe' }).click();
     const dialog = ruleDialog(page);
     await expect(dialog.getByRole('textbox')).toHaveValue('Mail from deals@promo.example.com that has a one-click unsubscribe: ');
     await expect(page).toHaveURL(DEALS);
@@ -180,13 +181,13 @@ test.describe('What Sift saw', () => {
 
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
-    await expect(panelHeading(page, '48 hours only: 30% off')).toBeVisible();
+    await expect(readerHeading(page, '48 hours only: 30% off')).toBeVisible();
     await expect(page).toHaveURL(DEALS);
 
-    await makeRule(panel(page));
+    await makeRule(reader(page));
     await dialog.getByRole('button', { name: 'Close' }).click();
     await expect(dialog).toHaveCount(0);
-    await expect(panel(page)).toBeVisible();
+    await expect(reader(page)).toBeVisible();
     await param(page, 'message').toBe('m4');
   });
 
@@ -200,25 +201,25 @@ test.describe('What Sift saw', () => {
     await path(page).toMatch(/^\/rules\/r-/);
 
     await page.goBack();
-    await expect(panelHeading(page, 'Winter sale starts now')).toBeVisible();
+    await expect(readerHeading(page, 'Winter sale starts now')).toBeVisible();
     await path(page).toBe('/');
     await param(page, 'message').toBe('m8');
 
     await page.keyboard.press('Escape');
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
     await expect(page.getByRole('cell', { name: 'Winter sale starts now' })).toHaveCount(0);
   });
 
   test('a label added from the panel leaves the panel open on the message', async ({ page }) => {
     await page.goto(`/?${messageQuery('m7')}`);
-    await choose(panel(page), 'Add a label…');
+    await choose(reader(page), 'Add a label…');
     await expect(addLabelsDialog(page)).toBeVisible();
     await writeLabel(page, 'Field trips');
-    await expect(panelHeading(page, 'Notes from the review')).toBeVisible();
+    await expect(readerHeading(page, 'Notes from the review')).toBeVisible();
     await param(page, 'message').toBe('m7');
 
-    await choose(panel(page), 'Field trips');
+    await choose(reader(page), 'Field trips');
     await expect(toasts(page)).toContainText('as Field trips');
   });
 
@@ -256,9 +257,9 @@ test.describe('What Sift saw', () => {
 test.describe('A message opened by its address', () => {
   test('opens over For review, and Close leaves For review with nothing in the address', async ({ page }) => {
     await page.goto(`/?${messageQuery('m6')}`);
-    await expect(panelHeading(page, 'Lunch on Thursday?')).toBeVisible();
-    await panel(page).getByRole('button', { name: 'Close' }).click();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(readerHeading(page, 'Lunch on Thursday?')).toBeVisible();
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await path(page).toBe('/');
     await query(page).toBe('');
     await expect(row(page, 'Lunch on Thursday?')).toBeVisible();
@@ -266,14 +267,14 @@ test.describe('A message opened by its address', () => {
 
   test('Escape closes it, and opening a row afterwards opens that row', async ({ page }) => {
     await page.goto(`/?${messageQuery('m6')}`);
-    await expect(panelHeading(page, 'Lunch on Thursday?')).toBeVisible();
+    await expect(readerHeading(page, 'Lunch on Thursday?')).toBeVisible();
     await page.keyboard.press('Escape');
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
 
     await openMessage(page, 'Notes from the review');
-    await panel(page).getByRole('button', { name: 'Close' }).click();
-    await expect(panel(page)).toHaveCount(0);
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
   });
 });
@@ -284,13 +285,13 @@ test.describe('A message opened from a list', () => {
     await openMessage(page, 'Notes from the review');
     await param(page, 'message').toBe('m7');
     await page.goBack();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
 
     await page.goForward();
-    await expect(panelHeading(page, 'Notes from the review')).toBeVisible();
-    await panel(page).getByRole('button', { name: 'Close' }).click();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(readerHeading(page, 'Notes from the review')).toBeVisible();
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
   });
 
@@ -298,7 +299,7 @@ test.describe('A message opened from a list', () => {
     await page.goto('/');
     await (await openMessage(page, 'Notes from the review')).getByRole('link', { name: 'Grace Hopper' }).click();
     await expect(page.getByRole('heading', { name: 'Grace Hopper', level: 1 })).toBeVisible();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
     await path(page).toBe(senderPage('grace@example.net'));
     await param(page, 'message').toBeNull();
   });

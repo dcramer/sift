@@ -56,3 +56,8 @@ export function startTelemetry(where: Session['telemetry']): void {
     })
     .catch(() => {});
 }
+
+/** A failure the page caught itself (`Failed`), which the SDK would otherwise never see. Dropped when nothing was started. */
+export function reportError(error: unknown): void {
+  void import('./telemetry-sdk.ts').then(({ captureException }) => captureException(error)).catch(() => {});
+}

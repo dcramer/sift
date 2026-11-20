@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { arrived, period } from '../web/src/lib/format.ts';
+import { arrived, heard, period } from '../web/src/lib/format.ts';
 
 // Thursday, Nov 19 2026, 3:30 PM, in the tests' zone (UTC).
 const NOW = Date.UTC(2026, 10, 19, 15, 30);
@@ -27,5 +27,12 @@ describe('a list of mail, by when it came', () => {
   it('says the time of day until yesterday, then the weekday, then the date', () => {
     expect([0, 1, 3, 9].map((days) => arrived(daysBack(days, 14), NOW))).toEqual(['2:05 PM', '2:05 PM', 'Mon', 'Nov 10']);
     expect(arrived(Date.UTC(2025, 11, 30), NOW)).toBe('Dec 30, 2025');
+  });
+});
+
+describe('a message in a conversation, by when it came', () => {
+  it('says the time today, then the day and the time, and the year only when it is another', () => {
+    expect([0, 1, 9].map((days) => heard(daysBack(days, 14), NOW))).toEqual(['2:05 PM', 'Nov 18, 2:05 PM', 'Nov 10, 2:05 PM']);
+    expect(heard(Date.UTC(2025, 11, 30, 14, 5), NOW)).toBe('Dec 30, 2025');
   });
 });

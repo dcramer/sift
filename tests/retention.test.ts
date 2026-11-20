@@ -1,7 +1,7 @@
 import type { Sql } from '../src/store/sql.ts';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { RETENTION_DAYS, pruneOld } from '../src/work/retention.ts';
-import { KEEP_BODY_DAYS } from '../src/work/bodies.ts';
+import { READ_KEEP_DAYS } from '../src/store/kept.ts';
 import { memoryEphemeral } from '../src/ephemeral/ephemeral.ts';
 import { type RunOptions, type Work, dueWork, runWork, upkeep } from '../src/work/run.ts';
 import { applyFeedback, pendingSuggestions } from '../src/learn/feedback.ts';
@@ -55,6 +55,7 @@ describe('pruneOld', () => {
   it('forgets an old message with its decisions, changes and model runs', async () => {
     await acted('gone');
     await modelRun(db, { messageId: 'gone', model: 'p/m', at: OLD });
+    await raw(db).run(`INSERT INTO mail_bodies (account_id, message_id, body_text, fetched_at) VALUES (?, 'gone', 'Text.', ?)`, ACCOUNT, OLD);
     await acted('fresh');
     await message('new', RECENT);
     await recordDecision(db, ACCOUNT, 'new', archive, { carryOut: true, now: RECENT });
@@ -65,6 +66,7 @@ describe('pruneOld', () => {
     expect(await left('decisions')).toEqual(['fresh', 'new']);
     expect(await left('actions')).toEqual(['fresh']);
     expect(await left('model_runs')).toEqual([]);
+    expect(await left('mail_bodies')).toEqual([]);
     expect(await pruneOld(db, NOW)).toBe(0);
   });
 
@@ -135,18 +137,18 @@ describe('pruneOld', () => {
 });
 
 describe('daily upkeep', () => {
-  it('deletes the text of waiting mail after 30 days for everyone, whether or not Gmail can be reached', async () => {
+  it('deletes the text Sift read 30 days after reading it, for everyone, whether or not Gmail can be reached', async () => {
     await message('old');
     await message('young');
     await raw(db).run(
-      `INSERT INTO suggestion_bodies (account_id, message_id, body_text, fetched_at) VALUES (?, 'old', 'Old text.', ?), (?, 'young', 'Young text.', ?)`,
+      `INSERT INTO read_bodies (account_id, message_id, body_text, fetched_at) VALUES (?, 'old', 'Old text.', ?), (?, 'young', 'Young text.', ?)`,
       ACCOUNT,
-      NOW - (KEEP_BODY_DAYS + 1) * DAY,
+      NOW - (READ_KEEP_DAYS + 1) * DAY,
       ACCOUNT,
       NOW - DAY,
     );
     await upkeep(db, { log: () => {}, now: () => NOW });
-    expect(await left('suggestion_bodies')).toEqual(['young']);
+    expect(await left('read_bodies')).toEqual(['young']);
   });
 });
 

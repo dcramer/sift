@@ -1,4 +1,6 @@
-import { and, asc, eq, gt, isNull, lte, accounts, credentials, labels, mailboxes, messages as messageRows, users } from './query.ts';
+import { and, asc, eq, gt, isNull, lte, accounts, credentials, labels, mailboxes, messages as messageRows, preferences, users } from './query.ts';
+import { startCopies } from './copies.ts';
+import { windowStart } from '../mail-window.ts';
 import { inboxRow } from './labels.ts';
 import type { Sql } from './sql.ts';
 import { sealFacts, sealMessage } from './content.ts';
@@ -57,10 +59,15 @@ export async function ensureMailbox(db: Sql, mailbox: { id: string; historyId?: 
   });
 }
 
-/** A mailbox in one person's own database, or its cursor reset if it is there already. */
-export async function addMailbox(db: Sql, id: string, historyId: string): Promise<void> {
+/** A mailbox in one person's own database, or its cursor reset if it is there already. A new one is copied for Inbox while it is on. */
+export async function addMailbox(db: Sql, id: string, historyId: string, now: number = Date.now()): Promise<void> {
   await db.transaction(async (tx) => {
-    if (!(await ensureMailbox(tx, { id, historyId }))) await tx.update(mailboxes).set({ historyId }).where(eq(mailboxes.id, id));
+    if (!(await ensureMailbox(tx, { id, historyId }))) {
+      await tx.update(mailboxes).set({ historyId }).where(eq(mailboxes.id, id));
+      return;
+    }
+    const [inbox] = await tx.select({ on: preferences.mail, window: preferences.mailWindow }).from(preferences);
+    if (inbox?.on) await startCopies(tx, [id], { since: windowStart(inbox.window, now), before: now, now });
   });
 }
 
@@ -211,6 +218,16 @@ export async function listAccounts(db: Sql): Promise<Account[]> {
   return rows.map((r) => ({ id: r.id, number: r.number, email: r.id, historyId: r.historyId }));
 }
 
+/** Whether the sign-in Sift holds for this mailbox lets it send. */
+export async function canSend(db: Sql, accountId: string): Promise<boolean> {
+  const [row] = await db.select({ canSend: mailboxes.canSend }).from(mailboxes).where(eq(mailboxes.id, accountId));
+  return row?.canSend ?? false;
+}
+
+export async function setCanSend(db: Sql, accountId: string, can: boolean): Promise<void> {
+  await db.update(mailboxes).set({ canSend: can }).where(eq(mailboxes.id, accountId));
+}
+
 /** The mailbox's other addresses in Gmail, as its last sync found them. */
 export async function mailboxAliases(db: Sql, accountId: string): Promise<string[]> {
   const [row] = await db.select({ aliases: mailboxes.aliases }).from(mailboxes).where(eq(mailboxes.id, accountId));
@@ -224,7 +241,14 @@ export async function setMailboxAliases(db: Sql, accountId: string, aliases: rea
     .where(eq(mailboxes.id, accountId));
 }
 
-async function insertMessages(db: Sql, accountId: string, messages: readonly MessageFacts[], now: number, suggestOnly: boolean): Promise<number> {
+async function insertMessages(
+  db: Sql,
+  accountId: string,
+  messages: readonly MessageFacts[],
+  now: number,
+  suggestOnly: boolean,
+  decided = false,
+): Promise<number> {
   if (messages.length === 0) return 0;
   const aliases = await mailboxAliases(db, accountId);
   const added = await db
@@ -239,6 +263,7 @@ async function insertMessages(db: Sql, accountId: string, messages: readonly Mes
         labelIds: m.labelIds,
         syncedAt: now,
         suggestOnly,
+        decided,
         facts: sealFacts(deriveFacts(m, {}, aliases)),
       })),
     )
@@ -276,6 +301,14 @@ export async function recordSync(
 /** Record synced messages before the cursor moves, for a sync too long to fetch in one go. Returns how many were not already known. */
 export async function recordSynced(db: Sql, accountId: string, messages: readonly MessageFacts[], now: number = Date.now()): Promise<number> {
   return await db.transaction(async (tx) => await insertMessages(tx, accountId, messages, now, false));
+}
+
+/**
+ * Record mail found in the inbox that Sift had not seen, read for a look that decides nothing (what a rule would do), so it
+ * is not read again. Out of the triage queue, as the copy's mail is: going through the inbox or applying a rule decides it.
+ */
+export async function recordFound(db: Sql, accountId: string, messages: readonly MessageFacts[], now: number): Promise<void> {
+  await db.transaction(async (tx) => await insertMessages(tx, accountId, messages, now, false, true));
 }
 
 /**

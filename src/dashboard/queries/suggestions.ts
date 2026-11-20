@@ -1,4 +1,4 @@
-import { alias, and, count, decisions, eq, inArray, isNotNull, max, messages as messageRows, not, suggestionBodies } from '../../store/query.ts';
+import { alias, and, count, decisions, eq, inArray, isNotNull, mailBodies, max, messages as messageRows, not, readBodies } from '../../store/query.ts';
 import { noDecision } from '../../store/messages.ts';
 import { goingInboxRuns } from '../../store/inbox.ts';
 import { outOfTries } from '../../store/runs.ts';
@@ -14,6 +14,7 @@ import { type Scope, sees, within } from '../scope.ts';
 import { FACT_FILTERS, type FactFilter, type SuggestionDetail, type SuggestionItem, type Suggestions } from '../types.ts';
 import { outcomeOf } from './labels.ts';
 import { plain, seal } from '../../plain.ts';
+import type { Confidential } from '../../confidential.ts';
 
 /** One sender's waiting mail, in all of the person's mailboxes, newest first. */
 export async function suggestionDetail(db: Sql, scope: Scope, sender: string): Promise<SuggestionDetail> {
@@ -104,30 +105,23 @@ export async function listSuggestions(db: Sql, scope: Scope, options: { includeK
         return name ? [{ id, name, share: n / total }] : [];
       });
   };
-  // The text is held only while a message waits on the user, which every one shown here does.
-  const previews = new Map(
-    (
-      await db
-        .select({
-          accountId: suggestionBodies.accountId,
-          messageId: suggestionBodies.messageId,
-          text: suggestionBodies.bodyText,
-        })
-        .from(suggestionBodies)
-        .where(within(scope, suggestionBodies.accountId))
-    ).map(
-      (r) =>
-        [
-          `${r.accountId}\n${r.messageId}`,
-          seal(
-            plain(openPart(db, r.accountId, r.messageId, 'text', r.text))!
-              .slice(0, 400)
-              .replace(/\s+/g, ' ')
-              .trim(),
-          ),
-        ] as const,
-    ),
-  );
+  // The text Sift holds of what is shown: Inbox's copy, or what it read with Inbox off.
+  const previews = new Map<string, Confidential>();
+  const ids = [...new Set(shown.map((s) => s.messageId))];
+  for (const table of ids.length === 0 ? [] : [readBodies, mailBodies])
+    for (const r of await db
+      .select({ accountId: table.accountId, messageId: table.messageId, text: table.bodyText })
+      .from(table)
+      .where(and(within(scope, table.accountId), inArray(table.messageId, ids))))
+      previews.set(
+        `${r.accountId}\n${r.messageId}`,
+        seal(
+          plain(openPart(db, r.accountId, r.messageId, 'text', r.text))!
+            .slice(0, 400)
+            .replace(/\s+/g, ' ')
+            .trim(),
+        ),
+      );
   const known = await contacts(
     db,
     scope.accounts,

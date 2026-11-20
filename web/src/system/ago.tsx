@@ -1,6 +1,6 @@
 'use client';
 import { useSyncExternalStore } from 'react';
-import { ago, arrived } from '@/lib/format.ts';
+import { ago, arrived, heard } from '@/lib/format.ts';
 
 const MINUTE = 60_000;
 const everyHalfMinute = (tick: () => void) => {
@@ -23,6 +23,12 @@ export function Ago({ at }: { at: number }) {
 export function Arrived({ at }: { at: number }) {
   const now = useNow();
   return now === null ? null : <time dateTime={new Date(at).toISOString()}>{arrived(at, now)}</time>;
+}
+
+/** When a message in a conversation came, short: "7:32 PM" today, "Nov 19, 7:32 PM" before. Drawn in the browser, as `Ago` is. */
+export function Heard({ at }: { at: number }) {
+  const now = useNow();
+  return now === null ? null : <time dateTime={new Date(at).toISOString()}>{heard(at, now)}</time>;
 }
 
 /** The time in the browser to the minute, kept current; null on the server, whose clock and zone are not the reader's. */

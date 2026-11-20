@@ -278,11 +278,13 @@ const googleTasks = (deps: InitDeps): Task[] => [
     url: 'https://console.cloud.google.com/auth/scopes',
     todo: [
       'Open "Data Access" in the left menu, then choose "Add or remove scopes".',
-      'Paste both scopes below into "Manually add scopes", then Add to table, Update and Save.',
+      'Paste the scopes below into "Manually add scopes", then Add to table, Update and Save.',
+      'The last is asked for only when someone lets Sift send from a mailbox.',
     ],
     values: [
       ['Scopes', 'https://www.googleapis.com/auth/gmail.modify'],
       ['', 'https://www.googleapis.com/auth/gmail.settings.basic'],
+      ['', 'https://www.googleapis.com/auth/gmail.send'],
     ],
   },
 ];

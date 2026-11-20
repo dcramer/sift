@@ -16,6 +16,7 @@ import { addRule, countRuleHit, removeRule } from '../src/store/rules.ts';
 import { ACCOUNT, DAY, codeSignIn, everything, facts, quietSources, testModel } from './helpers.ts';
 import { conditionsHash } from '../src/store/content.ts';
 import { triageAccount } from '../src/work/triage.ts';
+import { applyFeedback } from '../src/learn/feedback.ts';
 import { plain } from '../src/plain.ts';
 
 const NOW = Date.UTC(2026, 5, 15, 12);
@@ -122,6 +123,7 @@ describe('tracking', () => {
       listFilters: async () => [],
       insertMessage: async () => ({ id: 'i', labelIds: [] }),
       findByMessageId: async () => null,
+      send: async () => ({ id: 's', threadId: 's', labelIds: [] }),
     };
     await execute({ db, mailbox, now: () => NOW }, ACCOUNT, 'a', { type: 'archive' }, 1);
     expect(await raw(db).get('SELECT decision_id, status FROM actions')).toEqual({ decision_id: 1, status: 'done' });
@@ -357,9 +359,19 @@ describe('dashboard server', () => {
       `${base}/api/message?id=c`,
     );
     expect(detail.subject).toBe('<img src=x onerror=alert(1)>');
-    expect(detail.decisions).toMatchObject([{ stage: 'model', inputTokens: 900, durationMs: 1500 }]);
+    expect(detail.decisions).toMatchObject([{ stage: 'model', inputTokens: 900, durationMs: 1500, answer: null }]);
     expect(detail.actions).toEqual([]);
     expect((await fetch(`${base}/api/message?id=nope`)).status).toBe(404);
+  });
+
+  it("carries the reader's answer on the decision it corrected, which every list shows instead", async () => {
+    const { store, db } = await seededStore();
+    const base = await start({}, store);
+    type Detail = { fromAddress: string; decisions: { id: number; labelId: string | null; answer: { labelId: string | null; disposition: string } | null }[] };
+    const before = await get<Detail>(`${base}/api/message?id=b`);
+    await applyFeedback(db, { accountId: ACCOUNT, sender: before.fromAddress, messageId: 'b', decisionId: before.decisions[0]!.id, label: 'newsletter' }, NOW);
+    const after = await get<Detail>(`${base}/api/message?id=b`);
+    expect(after.decisions).toMatchObject([{ id: before.decisions[0]!.id, labelId: null, answer: { labelId: 'newsletter', disposition: 'archive' } }]);
   });
 
   it('lists rules with their hits', async () => {

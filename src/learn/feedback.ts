@@ -23,12 +23,12 @@ import {
   or,
   rules,
   sql,
-  suggestionBodies,
 } from '../store/query.ts';
 import type { Sql } from '../store/sql.ts';
-import { exampleKeysOf, hashOf, openEnvelope, openPart } from '../store/content.ts';
+import { exampleKeysOf, hashOf, openEnvelope } from '../store/content.ts';
 import { listLabels } from '../store/labels.ts';
 import { recordDecision } from '../store/decisions.ts';
+import { exampleText } from '../store/kept.ts';
 import { proposeFromCorrections } from '../store/proposals.ts';
 import type { RuleFacts } from '../triage/facts.ts';
 import { factsWhere } from '../store/messages.ts';
@@ -261,21 +261,14 @@ export async function applyFeedback(db: Sql, input: FeedbackInput, now: number =
         .insert(feedback)
         .values({ accountId: target.accountId, decisionId: target.decisionId, ...answered })
         .onConflictDoUpdate({ target: [feedback.userId, feedback.decisionId], set: answered });
-      // Every marked message is kept whole as an example. Its text was kept only while it waited on the user,
-      // so it moves to the example; without it, `sift run` fetches the message on its next pass.
-      const waiting = and(eq(suggestionBodies.accountId, target.accountId), eq(suggestionBodies.messageId, target.messageId));
-      const [kept] = await tx.select({ text: suggestionBodies.bodyText, html: suggestionBodies.bodyHtml }).from(suggestionBodies).where(waiting);
-      // A message gone from Gmail was kept empty; fetching it again records it as gone.
-      const held =
-        kept && (kept.html !== null || plain(openPart(tx, target.accountId, target.messageId, 'text', kept.text)) !== '')
-          ? { status: 'captured' as const, bodyText: kept.text, bodyHtml: kept.html }
-          : {};
+      // Every marked message is kept as an example, with the text Sift holds of it; without any, the next pass captures it.
+      const kept = await exampleText(tx, target.accountId, target.messageId);
+      const held = kept ? { status: 'captured' as const, ...kept } : {};
       const marked = { labelId: label.id, markedAt: now, ...held };
       await tx
         .insert(examples)
         .values({ accountId: target.accountId, messageId: target.messageId, ...marked, ...(await exampleKeysOf(tx, target.accountId, target.messageId)) })
         .onConflictDoUpdate({ target: [examples.userId, examples.accountId, examples.messageId], set: marked });
-      await tx.delete(suggestionBodies).where(waiting);
     }
     // Mail Sift already marked in Gmail gets the answer as a decision of its own however it was given, as a correction would.
     for (const target of targets) if (input.carryOut || target.carriedOut) await recordDecision(tx, input.accountId, target.messageId, answer, carried);

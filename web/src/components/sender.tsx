@@ -2,8 +2,8 @@
 import { MegaphoneIcon, ReplyIcon, SparkleIcon } from 'lucide-react';
 import { Fragment, type ReactNode } from 'react';
 import { type Contact, type RuleMatch, type SenderProfile, api, useLoaded } from '@/lib/api.ts';
-import { CONTACT_SAYS, INBOX, MATCH_WORDS, type Said, doesName, factAnswers, factWords, outcomeName, plural, saidOf, shortDate } from '@/lib/format.ts';
-import { Blank, Fact, Facts, Failure, Hint, HoverCard, Marked, Sub, Td } from '@/system';
+import { CONTACT_SAYS, INBOX, MATCH_WORDS, type Said, count, doesName, factAnswers, factWords, outcomeName, plural, saidOf, shortDate } from '@/lib/format.ts';
+import { Ago, Blank, Fact, Facts, Failure, Hint, HoverCard, Marked, Sub, Td } from '@/system';
 import { reveal } from '@/lib/reveal.ts';
 
 /** A sender's page; with `name`, their mail under that name. */
@@ -12,10 +12,10 @@ const domainHref = (domain: string) => `/domain/${encodeURIComponent(domain)}`;
 
 const CONTACT_ICONS = { new: SparkleIcon, mutual: ReplyIcon, 'one-way': MegaphoneIcon } as const;
 
-/** How the owner and a sender know each other, after their name. Someone new is yellow: look at them first. */
-export function ContactHint({ contact }: { contact: Contact }) {
+/** How the owner and a sender know each other, after their name, or in words (`said`) under it on their page. Someone new is yellow: look at them first. */
+export function ContactHint({ contact, said }: { contact: Contact; said?: boolean }) {
   if (!contact) return null;
-  return <Hint icon={CONTACT_ICONS[contact]} says={CONTACT_SAYS[contact]} tone={contact === 'new' ? 'look' : 'plain'} />;
+  return <Hint icon={CONTACT_ICONS[contact]} says={CONTACT_SAYS[contact]} tone={contact === 'new' ? 'look' : 'plain'} said={said ?? false} />;
 }
 
 /** What sift's rules say about a sender, one per line. */
@@ -49,12 +49,14 @@ function Rules({ rules }: { rules: SenderProfile['rules'] }) {
 }
 
 /**
- * What sift knows about a sender or a domain, as facts: how much they send and
- * what it is, whether the owner writes to them, and the rules about them. `brief` leaves out the rules
- * and the domain, for a preview.
+ * What sift knows about a sender or a domain, as facts: how much they send and what it is, whether the owner writes to
+ * them, their domain and the rules about them. A preview (`card`) leaves out the rules and the domain; their own page
+ * (`page`) says those, and how they know each other, elsewhere, and how much they sent lately here.
  */
-export function SenderFacts({ profile, brief }: { profile: SenderProfile; brief?: boolean }) {
+export function SenderFacts({ profile, on }: { profile: SenderProfile; on?: 'card' | 'page' }) {
   const [top, ...others] = profile.labels;
+  // Their page says how the reader knows them under their name.
+  const writtenSaid = on === 'page' && (profile.contact === 'mutual' || profile.contact === 'one-way');
   return (
     <Facts>
       <Fact term="Mail">
@@ -64,6 +66,12 @@ export function SenderFacts({ profile, brief }: { profile: SenderProfile; brief?
               profile.senders > 1 ? `, from ${plural(profile.senders, 'address', 'addresses')}` : ''
             }`}
       </Fact>
+      {/* Said only where it is not all of their mail, which the line above says. */}
+      {on === 'page' && profile.lastSeenAt !== null && profile.recent < profile.messages ? (
+        <Fact term="Last 30 days">
+          {count(profile.recent)}, latest <Ago at={profile.lastSeenAt} />
+        </Fact>
+      ) : null}
       {top ? (
         <Fact term="Mostly">
           {top.name}
@@ -78,8 +86,10 @@ export function SenderFacts({ profile, brief }: { profile: SenderProfile; brief?
           ) : null}
         </Fact>
       ) : null}
-      {profile.userHasWritten === null ? null : <Fact term="You wrote">{profile.userHasWritten ? 'Yes, you have written to them' : 'Never'}</Fact>}
-      {!brief && profile.domain ? (
+      {profile.userHasWritten === null || writtenSaid ? null : (
+        <Fact term="You wrote">{profile.userHasWritten ? 'Yes, you have written to them' : 'Never'}</Fact>
+      )}
+      {on === undefined && profile.domain ? (
         <Fact term="Domain">
           <span className="inline-flex items-center gap-2">
             <DomainLink domain={reveal(profile.domain.name)} />
@@ -87,7 +97,7 @@ export function SenderFacts({ profile, brief }: { profile: SenderProfile; brief?
           </span>
         </Fact>
       ) : null}
-      {!brief && profile.rules.length > 0 ? (
+      {on === undefined && profile.rules.length > 0 ? (
         <Fact term={profile.rules.length === 1 ? 'Rule' : 'Rules'}>
           <Rules rules={profile.rules} />
         </Fact>
@@ -117,7 +127,7 @@ function Preview({ who }: { who: Who }) {
         </p>
         {data.name ? <p className="truncate text-muted-foreground">{key}</p> : null}
       </div>
-      <SenderFacts profile={data.profile} brief />
+      <SenderFacts profile={data.profile} on="card" />
     </div>
   );
 }

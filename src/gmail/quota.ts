@@ -11,6 +11,9 @@ export type Pace = (units: number) => Promise<void>;
  */
 const BUCKET = { burst: 1_000, perMinute: 4_800 };
 
+/** What one mailbox's work spends of Gmail's quota a minute, sustained. */
+export const QUOTA_PER_MINUTE = BUCKET.perMinute;
+
 export const pacer =
   (ephemeral: Ephemeral, account: string): Pace =>
   async (units) => {

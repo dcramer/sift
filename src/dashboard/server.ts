@@ -25,6 +25,8 @@ const FRAME_HEADERS = {
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 /** Answered here rather than by a route module. */
 const SIGN_IN_PATHS = new Set(['/auth/login', '/auth/callback', '/api/session', '/api/signout']);
+/** A sign-in in flight: the PKCE verifier, whose mailbox it adds or lets send, and where to return to. */
+type PendingSignIn = { verifier: string; redirectUri: string; addTo: string | null; send: string | null; to: string; expires: number };
 
 // Data, fetched by the page: a policy or a referrer policy would govern nothing.
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
@@ -98,6 +100,8 @@ export interface DashboardOptions {
   signInAddresses?: readonly string[];
   /** `SIFT_CLOUD`: this Sift is a service for other people, with terms, a privacy policy and a security page. */
   cloud?: boolean;
+  /** Which build of the page this server came with (`SIFT_BUILD`, next.config.js), for a page left open across an update to notice. */
+  build?: string | null;
   /** What the dashboard can ask the rest of sift to do. Without it the page can look but not manage. */
   controls?: Controls;
   /** Where an error goes that is Sift's own, not a `Refusal`: the page is told only that something failed. */
@@ -113,6 +117,8 @@ export interface Dashboard {
 }
 
 const SESSION_DAYS = 30;
+/** A session in use is issued again once this old, so someone who opens Sift within the month is never signed out. */
+const RENEW_MS = 86_400_000;
 const b64 = (value: string | Buffer) => Buffer.from(value).toString('base64url');
 
 /** A session cookie value: which mailbox, whose, until when, signed so it cannot be forged or altered. */
@@ -121,8 +127,8 @@ function signSession(session: { email: string; person: number }, secret: string,
   return `${body}.${createHmac('sha256', secret).update(body).digest('base64url')}`;
 }
 
-/** The mailbox and person a session cookie was issued to, or null if it is missing, forged or expired. */
-function readSession(value: string | undefined, secret: string, now: number): { email: string; person: number } | null {
+/** The mailbox and person a session cookie was issued to, and when it ends, or null if it is missing, forged or expired. */
+function readSession(value: string | undefined, secret: string, now: number): { email: string; person: number; expires: number } | null {
   const [body, signature] = (value ?? '').split('.');
   if (!body || !signature) return null;
   const expected = Buffer.from(createHmac('sha256', secret).update(body).digest('base64url'));
@@ -130,7 +136,7 @@ function readSession(value: string | undefined, secret: string, now: number): { 
   if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
   try {
     const { e, p, x } = JSON.parse(Buffer.from(body, 'base64url').toString()) as { e?: unknown; p?: unknown; x?: unknown };
-    return typeof e === 'string' && typeof p === 'number' && typeof x === 'number' && x > now ? { email: e, person: p } : null;
+    return typeof e === 'string' && typeof p === 'number' && typeof x === 'number' && x > now ? { email: e, person: p, expires: x } : null;
   } catch {
     return null;
   }
@@ -176,6 +182,7 @@ export function createDashboard(people: People, options: DashboardOptions = {}):
   if (signIn && !ephemeral) throw new Error('signIn needs an ephemeral store');
   const log = options.log ?? (() => {});
   const cloud = options.cloud ?? false;
+  const build = options.build ?? null;
   const report = (request: Request, error: unknown) =>
     log(`${request.method} ${new URL(request.url).pathname}: ${error instanceof Error ? error.message : String(error)}`);
   /** What the page is told of an error: a refusal's own words, anything else only that it failed. */
@@ -252,37 +259,51 @@ export function createDashboard(people: People, options: DashboardOptions = {}):
 
     if (signIn && method === 'GET' && url.pathname === '/api/session') {
       const reason = !signIn.hasClient() ? 'no-client' : !googleCanReturnHere ? 'address' : null;
-      return json(200, {
-        required: true,
-        email: session,
-        canSignIn: reason === null,
-        reason,
-        addresses: options.signInAddresses ?? [],
-        cloud,
-        telemetry: forThePage(),
-      });
+      // The page asks every few minutes while it is open, which is when a session is renewed.
+      const renewed: Record<string, string> =
+        session && issued && issued.expires - now() < SESSION_DAYS * 86_400_000 - RENEW_MS
+          ? { 'set-cookie': sessionCookie(signSession({ email: session, person: issued.person }, secret, now()), SESSION_DAYS * 86_400) }
+          : {};
+      return json(
+        200,
+        {
+          required: true,
+          email: session,
+          canSignIn: reason === null,
+          reason,
+          addresses: options.signInAddresses ?? [],
+          cloud,
+          telemetry: forThePage(),
+          build,
+        },
+        renewed,
+      );
     }
     if (signIn && method === 'GET' && url.pathname === '/auth/login') {
-      if (!signIn.hasClient() || !googleCanReturnHere) return redirect('/');
+      // Letting Sift send is for a mailbox of whoever is signed in.
+      const send = query.get('grant') === 'send' ? (query.get('mailbox') ?? '') : null;
+      if (!signIn.hasClient() || !googleCanReturnHere || (send !== null && !person?.accounts.includes(send))) return redirect('/');
       const state = randomBytes(16).toString('hex');
       const verifier = randomBytes(32).toString('base64url');
       const redirectUri = `${origin}/auth/callback`;
       // Adding a second account is only for someone already signed in. `to` is where the browser started, and only
       // ever a path on this site: anything else would make the sign-in a way to send someone elsewhere.
       const to = query.get('to') ?? '';
-      await ephemeral!.set(
-        pendingKey(state),
-        { verifier, redirectUri, addTo: query.get('add') === '1' ? session : null, to: LOCAL_PATH.test(to) ? to : '/', expires: now() + SIGN_IN_MS },
-        SIGN_IN_MS,
-      );
-      return redirect(signIn.url(redirectUri, state, createHash('sha256').update(verifier).digest('base64url')), signInCookie(state, SIGN_IN_MS / 1000));
+      const pending: PendingSignIn = {
+        verifier,
+        redirectUri,
+        addTo: query.get('add') === '1' && send === null ? session : null,
+        send,
+        to: LOCAL_PATH.test(to) ? to : '/',
+        expires: now() + SIGN_IN_MS,
+      };
+      await ephemeral!.set(pendingKey(state), pending, SIGN_IN_MS);
+      return redirect(signIn.url(redirectUri, state, createHash('sha256').update(verifier).digest('base64url'), send), signInCookie(state, SIGN_IN_MS / 1000));
     }
     if (signIn && method === 'GET' && url.pathname === '/auth/callback') {
       const state = query.get('state') ?? '';
       // Taken, so it completes once.
-      const entry = state
-        ? await ephemeral!.take<{ verifier: string; redirectUri: string; addTo: string | null; to: string; expires: number }>(pendingKey(state))
-        : null;
+      const entry = state ? await ephemeral!.take<PendingSignIn>(pendingKey(state)) : null;
       // Someone still signed in was adding a mailbox or signing in again, so it is said in Settings, where mailboxes are; the sign-in page is only for someone signed out.
       const fail = (message: string) => redirect(`/?${session ? 'settings=1&' : ''}signin=${encodeURIComponent(message)}`, signInCookie('', 0));
       const code = query.get('code');
@@ -290,9 +311,11 @@ export function createDashboard(people: People, options: DashboardOptions = {}):
       if (!same(cookie(request, 'sift_signin') ?? '', state)) return fail('That sign-in was started in another browser. Start it again here.');
       // A mailbox joins whoever started adding it, so that person must still be the one signed in here.
       if (entry.addTo !== null && session !== entry.addTo) return fail('Sign in again, then add the mailbox.');
+      if (entry.send !== null && !person?.accounts.includes(entry.send)) return fail('Sign in again, then let Sift send.');
       if (!code) return fail(query.get('error') === 'access_denied' ? 'Google did not grant access.' : 'Google did not complete the sign-in.');
       try {
-        const email = await signIn.complete(entry.redirectUri, code, entry.verifier, entry.addTo);
+        const email = await signIn.complete(entry.redirectUri, code, entry.verifier, entry.addTo, entry.send);
+        if (entry.send !== null) return redirect(entry.to, signInCookie('', 0));
         const who = await people.signedIn(email);
         if (!who) return fail('Google did not complete the sign-in.');
         // A mailbox added joins whoever is signed in, who stays signed in as themselves, back in Settings where they added it.
@@ -301,6 +324,7 @@ export function createDashboard(people: People, options: DashboardOptions = {}):
           return who.id === person?.id ? redirect('/?settings=1', signInCookie('', 0)) : fail(`${email} is already connected to Sift by someone else.`);
         return redirect(entry.to, sessionCookie(signSession({ email, person: who.id }, secret, now()), SESSION_DAYS * 86_400), signInCookie('', 0));
       } catch (error) {
+        if (error instanceof Refusal) return fail(error.message);
         report(request, error);
         return fail('Google did not complete the sign-in.');
       }
@@ -308,7 +332,7 @@ export function createDashboard(people: People, options: DashboardOptions = {}):
     if (signIn && session === null && url.pathname.startsWith('/api/')) return json(401, { error: 'Sign in to use the dashboard.' });
     if (signIn && method === 'POST' && url.pathname === '/api/signout') return json(200, { ok: true }, { 'set-cookie': sessionCookie('', 0) });
     if (!signIn && method === 'GET' && url.pathname === '/api/session')
-      return json(200, { required: false, email: null, canSignIn: false, reason: null, addresses: [], cloud, telemetry: forThePage() });
+      return json(200, { required: false, email: null, canSignIn: false, reason: null, addresses: [], cloud, telemetry: forThePage(), build });
 
     if (method === 'POST') {
       const handler = writes.get(url.pathname);

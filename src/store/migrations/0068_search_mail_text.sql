@@ -1,0 +1,2 @@
+ALTER TABLE "mail_bodies" ADD COLUMN "search" "bytea";--> statement-breakpoint
+CREATE INDEX "mail_bodies_unindexed" ON "mail_bodies" USING btree ("user_id","account_id") WHERE "mail_bodies"."search" IS NULL;

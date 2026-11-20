@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { Anchor } from './anchor.tsx';
 
 /**
- * A state of sift itself, true on every screen, so it goes in the masthead: sift cannot be reached, a
+ * A state of sift itself, true on every screen, so it goes at the top of every page: sift cannot be reached, a
  * sign-in has expired. `look` is for one the reader has to do something about, with `href` and `action`
  * for where; plain ink with a pulse is for one that mends itself. News about one page is a `Note`.
  */

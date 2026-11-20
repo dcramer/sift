@@ -7,7 +7,8 @@ import {
   expect,
   messageQuery,
   openMessage,
-  panel,
+  back,
+  reader,
   param,
   path,
   PHONE,
@@ -351,64 +352,64 @@ test.describe('Adding a label from an open message', () => {
 
   test('the new label is a choice in the same panel, and picking it answers the message', async ({ page }) => {
     await open(page);
-    await choose(panel(page), 'Add a label…');
+    await choose(reader(page), 'Add a label…');
     await expect(addLabelsDialog(page)).toBeVisible();
     await writeLabel(page, 'Field trips');
 
     await settled(page);
-    await expect(panel(page)).toBeVisible();
+    await expect(reader(page)).toBeVisible();
     await expect(page).toHaveURL(AT);
-    await choose(panel(page), 'Field trips');
+    await choose(reader(page), 'Field trips');
     await expect(toasts(page)).toContainText('as Field trips');
   });
 
   test('a suggested label is a choice in the same panel', async ({ page }) => {
     await open(page);
-    await choose(panel(page), 'Add a label…');
+    await choose(reader(page), 'Add a label…');
     const dialog = await askForLabels(page, 'No more sales pitches');
     await dialog.getByRole('button', { name: 'Add this label' }).click();
 
     await expect(dialog).toHaveCount(0);
     await settled(page);
     await expect(page).toHaveURL(AT);
-    await panel(page).getByRole('combobox', { name: 'What this message is' }).click();
+    await reader(page).getByRole('combobox', { name: 'What this message is' }).click();
     await expect(page.getByRole('option', { name: 'Sales pitches', exact: true })).toBeVisible();
   });
 
   test('closing the dialog leaves the panel as it was', async ({ page }) => {
     await open(page);
-    await choose(panel(page), 'Add a label…');
+    await choose(reader(page), 'Add a label…');
     const dialog = addLabelsDialog(page);
     await dialog.getByRole('button', { name: 'Close' }).click();
     await expect(dialog).toHaveCount(0);
     await settled(page);
-    await expect(panel(page)).toBeVisible();
+    await expect(reader(page)).toBeVisible();
     await expect(page).toHaveURL(AT);
   });
 
   test('Escape closes only the dialog', async ({ page }) => {
     await open(page);
-    await choose(panel(page), 'Add a label…');
+    await choose(reader(page), 'Add a label…');
     const dialog = addLabelsDialog(page);
     await expect(dialog.getByRole('textbox', { name: 'What mail, and what should happen to it?' })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     await settled(page);
-    await expect(panel(page)).toBeVisible();
+    await expect(reader(page)).toBeVisible();
     await expect(page).toHaveURL(AT);
   });
 
   test('closing the panel after adding a label keeps it closed', async ({ page }) => {
     await open(page);
-    await choose(panel(page), 'Add a label…');
+    await choose(reader(page), 'Add a label…');
     await writeLabel(page, 'Field trips');
 
-    await panel(page).getByRole('button', { name: 'Close' }).first().click();
-    await expect(panel(page)).toHaveCount(0);
+    await back(page).click();
+    await expect(reader(page)).toHaveCount(0);
     await query(page).toBe('');
     await settled(page);
     await expect(row(page, 'Lunch on Thursday?')).toBeVisible();
-    await expect(panel(page)).toHaveCount(0);
+    await expect(reader(page)).toHaveCount(0);
   });
 });
 

@@ -160,6 +160,29 @@ export async function execute(deps: ActionDeps, accountId: string, messageId: st
   return await applyChange(deps, { accountId, messageId, type: action.type, ...(decisionId === undefined ? {} : { decisionId }) }, current, change);
 }
 
+/** What the person can do to mail in their inbox from Inbox, and the change in Gmail each is. */
+const PRESSES = {
+  archive: { add: [], remove: ['INBOX'] },
+  read: { add: [], remove: ['UNREAD'] },
+  unread: { add: ['UNREAD'], remove: [] },
+} as const satisfies Record<string, LabelChange>;
+export type Press = keyof typeof PRESSES;
+
+/**
+ * The person's own press on one message, carried out whether Sift is on or not, as an answer is. Only a message in the
+ * inbox now is changed; nothing is added for what Sift did, since Sift did not decide it. With the outcome, the
+ * message's labels as Gmail last said them, for the record; null when it no longer exists.
+ */
+export async function press(deps: ActionDeps, accountId: string, messageId: string, what: Press): Promise<{ outcome: Outcome; labels: string[] | null }> {
+  await reconcile(deps, { accountId, messageId });
+  const current = await deps.mailbox.getLabelIds(messageId);
+  if (current === null) return { outcome: { status: 'skipped', reason: 'message no longer exists' }, labels: null };
+  if (!current.includes('INBOX')) return { outcome: { status: 'skipped', reason: 'message is not in the inbox' }, labels: current };
+  const { add, remove } = PRESSES[what];
+  const outcome = await applyChange(deps, { accountId, messageId, type: what }, current, { add: [...add], remove: [...remove] });
+  return { outcome, labels: outcome.status === 'done' ? outcome.finalLabels : current };
+}
+
 /** Spam is the costliest mistake, so every doubt refuses: unknown sender, failed lookup, or any prior correspondence. */
 async function spamRefusal(deps: ActionDeps, accountId: string, messageId: string): Promise<string | null> {
   const [row] = await deps.db
@@ -186,6 +209,7 @@ export async function undo(deps: ActionDeps, actionId: number): Promise<Outcome>
   if (action.type === 'undo') throw new Refusal(`Change #${actionId} is itself an undo.`);
   if (action.type === 'filter' || action.type === 'unfilter') throw new Refusal('A Gmail filter is added or taken out from its rule, not undone.');
   if (action.type === 'digest') throw new Refusal('A digest is a message of its own in your inbox. Archive it there.');
+  if (action.type === 'send') throw new Refusal('Mail once sent cannot be taken back.');
   if (action.type === 'unsubscribe') throw new Refusal('An unsubscribe cannot be undone from here. Subscribe again with the sender.');
   if (action.status !== 'done') throw new Refusal(`Change #${actionId} is ${action.status}; only completed changes can be undone.`);
 

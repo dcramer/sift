@@ -1,14 +1,15 @@
 'use client';
+import { ArrowLeftIcon } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import { type ReactNode, useState } from 'react';
 import { ErrorNote, StatusWord, Verdict } from '@/components/bits.tsx';
-import { ContactHint, DomainLink, NameCell, SenderCell } from '@/components/sender.tsx';
+import { ContactHint, DomainLink, NameCell, SenderCell, SenderFacts, senderHref } from '@/components/sender.tsx';
 import { type Given, type ListedDecision, type SenderPage, api, useLoaded } from '@/lib/api.ts';
 import { useAction } from '@/lib/action.ts';
-import { INBOX, count, dateTime, describeMatch, doesName, duration, longDay, outcomeName, percent, shortDay } from '@/lib/format.ts';
+import { INBOX, STANDINGS, count, dateTime, describeMatch, doesName, duration, longDay, outcomeName, percent, shortDay } from '@/lib/format.ts';
 import { type RuleStart, addedWords, messageStart, nameStart, standingStart } from '@/lib/rule-start.ts';
-import { nextMail } from '@/lib/next-mail.ts';
-import { messageKey, rulePath, useOpenRule, useParam } from '@/lib/params.ts';
+import { useCompose } from '@/lib/compose.ts';
+import { messageKey, rulePath, useGo, useOpenRule, useParam } from '@/lib/params.ts';
 import { RuleDialog } from '@/views/rule-dialog.tsx';
 import {
   Ago,
@@ -36,11 +37,7 @@ import { type OpenMessages, useOpenMessages } from '@/lib/open-messages.ts';
 import { useStarted } from '@/system/started.ts';
 import { reveal } from '@/lib/reveal.ts';
 
-const GIVE = [
-  ['trusted', 'Trust'],
-  ['unwanted', 'Unwanted'],
-  ['blocked', 'Block'],
-] as const;
+const GIVE = STANDINGS.map(([key, press]) => [key, press] as const);
 
 type Who = { address: string } | { domain: string };
 type Rule = SenderPage['profile']['rules'][number];
@@ -54,18 +51,6 @@ function byMessage(rows: readonly ListedDecision[]): ListedDecision[] {
 /** Mail no rule placed that Sift has not carried out and the reader has not answered. */
 const isWaiting = (row: ListedDecision) => !row.byUser && !row.carryOut && row.outcome === null && row.stage !== 'rules';
 
-/** A rule for all their mail, not some of it (under one name, say). */
-const forAll = (rule: Rule) => Object.keys(rule.match).length === 1;
-
-/** A rule for them alone: one that names others too is not how the owner regards this one. */
-const forExactly = (data: SenderPage, rule: Rule) => {
-  const named = data.kind === 'sender' ? rule.match.from : rule.match.fromDomain;
-  return forAll(rule) && named?.length === 1 && named[0] === data.profile.address;
-};
-
-/** The rule that decides their next message: one for exactly them wins over one for their domain. */
-const decidingRule = (data: SenderPage): Rule | null => data.profile.rules.find((r) => forExactly(data, r)) ?? data.profile.rules.find(forAll) ?? null;
-
 const ruleWords = (rule: Rule) =>
   `${reveal(rule.name) ?? `Mail ${describeMatch(reveal(rule.match))}`}${
     rule.kind === 'action' || rule.labelId === INBOX
@@ -73,10 +58,10 @@ const ruleWords = (rule: Rule) =>
       : `${rule.kind === 'when-label' ? ', when it is ' : ' is '}${rule.labelName ?? ''}`
   }`;
 
-/** What happens to their next message, and what says so: a rule, or the model, with how often it has been right. */
-function NextMail({ data, rule, labels, more }: { data: SenderPage; rule: Rule | null; labels: readonly { id: string }[] | undefined; more: ReactNode }) {
-  const next = nextMail(data, rule, labels);
-  const decides = rule !== null && rule.kind !== 'when-label';
+/** What happens to their next message, and what says so: the rule that decides it, or their mail, with how often Sift has been right. */
+function NextMail({ data }: { data: SenderPage }) {
+  const { next } = data;
+  const rule = data.profile.rules.find((r) => r.id === next.ruleId);
   const { right, wrong } = data.profile.answers;
   const others = data.profile.rules.filter((r) => r !== rule);
   return (
@@ -87,23 +72,17 @@ function NextMail({ data, rule, labels, more }: { data: SenderPage; rule: Rule |
         <Verdict labelId={next.labelId} labelName={next.labelName} disposition={next.disposition} />
       </p>
       <ul className="flex flex-col gap-0.5 text-sm text-muted-foreground">
-        {rule ? (
-          <li>
-            <TextLink href={rulePath(rule.id)}>{ruleWords(rule)}</TextLink>
-          </li>
-        ) : null}
-        {others.map((r) => (
+        {[...(rule ? [rule] : []), ...others].map((r) => (
           <li key={r.id}>
             <TextLink href={rulePath(r.id)}>{ruleWords(r)}</TextLink>
           </li>
         ))}
-        {decides ? null : (
+        {rule ? null : (
           <li>
             {data.profile.rules.length > 0 ? 'Otherwise the model decides each one' : 'The model decides each one'}
             {right + wrong > 0 ? `; right ${count(right)} of ${count(right + wrong)} times you checked` : ''}
           </li>
         )}
-        {more ? <li>{more}</li> : null}
         {data.profile.saved.messages > 0 ? (
           <li>
             {count(data.profile.saved.messages)} kept out of your inbox, about {duration(data.profile.saved.seconds)}
@@ -323,6 +302,8 @@ function SenderView({ who }: { who: Who }) {
   const { data, error, loading, reload } = useLoaded(`${'address' in who ? 'sender' : 'domain'}-page-${key}`, (signal) =>
     'address' in who ? api.sender(who.address, signal) : api.domain(who.domain, signal),
   );
+  const go = useGo();
+  const compose = useCompose();
   const give = useAction();
   const openRule = useOpenRule();
   // Undo is pressed after the standing is given, so what it reports goes to a toast.
@@ -365,6 +346,7 @@ function SenderView({ who }: { who: Who }) {
   if (loading || !data)
     return (
       <div className="flex flex-col gap-10">
+        <ToContacts />
         <PageHeader title={key} meta={null} />
         <Loading />
       </div>
@@ -378,138 +360,167 @@ function SenderView({ who }: { who: Who }) {
   const listed = under !== '' && narrowed.data ? byMessage(narrowed.data.decisions) : mail;
   const waiting = mail.filter(isWaiting);
   const items = waiting.map((r) => ({ accountId: r.accountId, messageId: r.messageId, subject: r.subject }));
-  const rule = decidingRule(data);
   const [top] = profile.labels;
-  // A standing is an action rule for exactly them, or Leave in inbox (trusted); a label rule that happens to archive is not one.
-  const given = rule && (rule.kind === 'action' || rule.labelId === INBOX) && forExactly(data, rule) ? profile.given : null;
   const charted = profile.messages >= CHARTED;
-  const volume = (
-    <span>
-      {count(profile.recent)} in the last 30 days
-      {profile.lastSeenAt ? (
-        <>
-          , latest <Ago at={profile.lastSeenAt} />
-        </>
-      ) : (
-        ''
-      )}
-    </span>
-  );
+  const domain = profile.domain ? reveal(profile.domain.name) : null;
+  const naming = [
+    ...(title ? [<span key="address">{key}</span>] : []),
+    ...(domain
+      ? [
+          // The hint belongs to the domain: on a phone it wraps with it, never onto a line of its own.
+          <span key="domain" className="inline-flex items-center gap-1 whitespace-nowrap">
+            <DomainLink domain={domain} />
+            <ContactHint contact={profile.domain?.contact ?? null} />
+          </span>,
+        ]
+      : []),
+  ].flatMap((part, index) => [
+    ...(index > 0
+      ? [
+          <span key={`dot ${index}`} aria-hidden>
+            ·
+          </span>,
+        ]
+      : []),
+    part,
+  ]);
+  // How they know each other takes a line of its own on a phone, where a dot would end the line above.
+  const meta =
+    naming.length > 0 || profile.contact ? (
+      <>
+        {naming}
+        {profile.contact ? (
+          <>
+            {naming.length > 0 ? (
+              <span aria-hidden className="phone:hidden">
+                ·
+              </span>
+            ) : null}
+            <span className="phone:basis-full">
+              <ContactHint contact={profile.contact} said />
+            </span>
+          </>
+        ) : null}
+      </>
+    ) : undefined;
 
   return (
-    <div className="flex flex-col gap-12">
-      <PageHeader
-        title={title ?? key}
-        badge={<ContactHint contact={profile.contact} />}
-        meta={
-          title || profile.domain ? (
-            <>
-              {title ? <span>{key}</span> : null}
-              {profile.domain ? (
-                <>
-                  {title ? <span aria-hidden>·</span> : null}
-                  {/* The hint belongs to the domain: on a phone it wraps with it, never onto a line of its own. */}
-                  <span className="inline-flex items-center gap-1 whitespace-nowrap">
-                    <DomainLink domain={reveal(profile.domain.name)} />
-                    <ContactHint contact={profile.domain.contact} />
-                  </span>
-                </>
-              ) : null}
-            </>
-          ) : undefined
-        }
-        actions={
-          waiting.length > 0 ? (
-            <Button variant="mark" onClick={() => onOpen(items, 0)}>
-              Answer {count(waiting.length)} waiting
-            </Button>
-          ) : undefined
-        }
-      />
-
-      <div className={charted ? 'grid grid-cols-[minmax(0,1fr)] gap-x-16 gap-y-10 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]' : ''}>
-        <div className="flex flex-col gap-5">
-          <NextMail data={data} rule={rule} labels={manage.data?.labels} more={charted ? null : volume} />
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <ChoiceGroup
-              label={`Where ${title ?? key} stands`}
-              value={given}
-              options={GIVE}
-              clearable
-              disabled={give.busy}
-              onChange={(standing) => (standing ? giveStanding(standing) : give.run(() => api.clearStanding(who), reload))}
-            />
-            <Button variant="quiet" onClick={() => setStarting(messageStart(key, top?.id ?? null))}>
-              Make a rule…
-            </Button>
-          </div>
-          <Failure>{give.error}</Failure>
-        </div>
-        {charted ? (
-          <div className="flex min-w-0 flex-col gap-2">
-            <p className="text-sm text-muted-foreground">{volume}</p>
-            <Volume rows={mail} firstSeenAt={profile.firstSeenAt} now={now} />
-          </div>
-        ) : null}
+    <div className="flex flex-col gap-10">
+      <div className="flex flex-col gap-3">
+        <ToContacts />
+        <PageHeader
+          title={title ?? key}
+          meta={meta}
+          actions={
+            (compose && 'address' in who) || waiting.length > 0 ? (
+              <>
+                {compose && 'address' in who ? <Button onClick={() => compose({ kind: 'new', to: who.address })}>Write to them</Button> : null}
+                {waiting.length > 0 ? (
+                  <Button variant="mark" onClick={() => onOpen(items, 0)}>
+                    Answer {count(waiting.length)} waiting
+                  </Button>
+                ) : null}
+              </>
+            ) : undefined
+          }
+        />
       </div>
 
-      {several ? (
-        <Section title="Names" meta={count(data.names.length)}>
-          <Names data={data} onStart={setStarting} />
-        </Section>
-      ) : profile.labels.length > 1 ? (
-        <Section title="What it is" meta={count(profile.labels.length)}>
-          <Labels data={data} onStart={setStarting} />
-        </Section>
-      ) : null}
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-x-16 gap-y-12 lg:grid-cols-[22rem_minmax(0,1fr)] lg:items-start">
+        <div className="flex flex-col gap-8">
+          <div className="flex flex-col gap-5">
+            <NextMail data={data} />
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <ChoiceGroup
+                label={`Where ${title ?? key} stands`}
+                value={profile.given}
+                options={GIVE}
+                clearable
+                disabled={give.busy}
+                onChange={(standing) => (standing ? giveStanding(standing) : give.run(() => api.clearStanding(who), reload))}
+              />
+              <Button variant="quiet" onClick={() => setStarting(messageStart(key, top?.id ?? null))}>
+                Make a rule…
+              </Button>
+            </div>
+            <Failure>{give.error}</Failure>
+          </div>
+          <SenderFacts profile={profile} on="page" />
+          {charted ? <Volume rows={mail} firstSeenAt={profile.firstSeenAt} now={now} /> : null}
+        </div>
 
-      {data.senders.length > 0 ? (
-        <Section title="Who writes from here" meta={count(data.senders.length)}>
-          <Table>
-            <Heads shown="always">
-              <Th>Sender</Th>
-              <Th num>Messages</Th>
-              <Th phone="hide" num>
-                Latest
-              </Th>
-            </Heads>
-            <tbody>
-              {data.senders.map((sender) => (
-                <Tr key={reveal(sender.address)}>
-                  <SenderCell address={reveal(sender.address)} name={reveal(sender.name)} contact={sender.contact} />
-                  <Td num>{count(sender.messages)}</Td>
-                  <Td phone="hide" num quiet>
-                    <Ago at={sender.lastSeenAt} />
-                  </Td>
-                </Tr>
-              ))}
-            </tbody>
-          </Table>
-        </Section>
-      ) : null}
+        <div className="flex min-w-0 flex-col gap-12">
+          {data.senders.length > 0 ? (
+            <Section title="People here" meta={count(data.senders.length)}>
+              <Table>
+                <Heads shown="always">
+                  <Th>Name</Th>
+                  <Th num>Messages</Th>
+                  <Th phone="hide" num>
+                    Latest
+                  </Th>
+                </Heads>
+                <tbody>
+                  {data.senders.map((sender) => (
+                    <Tr key={reveal(sender.address)} onOpen={() => go(senderHref(reveal(sender.address)))}>
+                      <SenderCell address={reveal(sender.address)} name={reveal(sender.name)} contact={sender.contact} />
+                      <Td num className="md:w-full">
+                        {count(sender.messages)}
+                      </Td>
+                      <Td phone="hide" num quiet says={dateTime(sender.lastSeenAt)}>
+                        <Ago at={sender.lastSeenAt} />
+                      </Td>
+                    </Tr>
+                  ))}
+                </tbody>
+              </Table>
+            </Section>
+          ) : null}
 
-      <Section
-        title="Their mail"
-        meta={count(listed.length)}
-        action={
-          several ? (
-            <Select
-              label="From"
-              value={under}
-              options={[['', 'Every name'] as const, ...data.names.flatMap((n) => (n.name === null ? [] : [[reveal(n.name), reveal(n.name)] as const]))]}
-              onChange={setUnder}
-            />
-          ) : undefined
-        }
-      >
-        {listed.length === 0 ? (
-          <Empty>No mail recorded from them.</Empty>
-        ) : (
-          <Mail rows={listed} onOpen={onOpen} from={data.kind === 'domain' ? 'sender' : several && under === '' ? 'name' : null} />
-        )}
-      </Section>
+          <Section
+            title="Their mail"
+            meta={count(listed.length)}
+            action={
+              several ? (
+                <Select
+                  label="From"
+                  value={under}
+                  options={[['', 'Every name'] as const, ...data.names.flatMap((n) => (n.name === null ? [] : [[reveal(n.name), reveal(n.name)] as const]))]}
+                  onChange={setUnder}
+                />
+              ) : undefined
+            }
+          >
+            {listed.length === 0 ? (
+              <Empty>No mail recorded from them.</Empty>
+            ) : (
+              <Mail rows={listed} onOpen={onOpen} from={data.kind === 'domain' ? 'sender' : several && under === '' ? 'name' : null} />
+            )}
+          </Section>
+
+          {several ? (
+            <Section title="Names" meta={count(data.names.length)}>
+              <Names data={data} onStart={setStarting} />
+            </Section>
+          ) : profile.labels.length > 1 ? (
+            <Section title="What it is" meta={count(profile.labels.length)}>
+              <Labels data={data} onStart={setStarting} />
+            </Section>
+          ) : null}
+        </div>
+      </div>
 
       {starting ? <RuleDialog labels={manage.data?.labels ?? []} start={starting} onClose={() => setStarting(null)} onAdded={reload} /> : null}
     </div>
+  );
+}
+
+/** Up to the list of everyone, which this page is one of. */
+function ToContacts() {
+  return (
+    <Button variant="quiet" href="/contacts" className="-ml-3 self-start">
+      <ArrowLeftIcon aria-hidden />
+      Contacts
+    </Button>
   );
 }

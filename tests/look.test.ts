@@ -6,7 +6,7 @@ import { type Ephemeral, memoryEphemeral } from '../src/ephemeral/ephemeral.ts';
 import { finishAction, insertPendingAction } from '../src/store/actions.ts';
 import { recordDecision } from '../src/store/decisions.ts';
 import { setRuleFilter } from '../src/store/filters.ts';
-import { setActive } from '../src/store/preferences.ts';
+import { setActive, setMail } from '../src/store/preferences.ts';
 import { examples } from '../src/store/query.ts';
 import { addRule } from '../src/store/rules.ts';
 import { goingInboxRuns, startInboxRuns } from '../src/store/inbox.ts';
@@ -58,6 +58,9 @@ function gmail(): GmailApi {
     },
     searchInbox: async () => ({ ids: arrived.map((a) => a.raw.id) }),
     inboxSize: async () => arrived.length,
+    searchMail: async () => ({ ids: [] }),
+    mailboxSize: async () => 0,
+    getMessage: async () => null,
     getMetadata: async (id) => arrived.find((a) => a.raw.id === id)?.raw ?? null,
     getLabelIds: async (id) => mailbox.labels.get(id) ?? null,
     listLabels: async () => [],
@@ -224,15 +227,26 @@ describe('the timed tick', () => {
     expect(await timedTickPasses()).toBe(true);
   });
 
-  it('begins one for the text of mail waiting on the person, to keep or to let go', async () => {
+  it('begins one for inbox mail without its text only while Inbox is on, and none once it has it', async () => {
+    // Decided, so nothing else is due for it.
+    await recordDecision(db, ACCOUNT, 'news', decision('keep'), { now: clock });
+    expect(await timedTickPasses()).toBe(false);
+    await setMail(db, true);
+    expect(await timedTickPasses()).toBe(true);
+    await workDue(store, options(), Infinity);
+    expect(await raw(db).all('SELECT message_id FROM mail_bodies')).toEqual([{ message_id: 'news' }]);
+    expect(await timedTickPasses()).toBe(false);
+  });
+
+  it('begins one for the text of mail waiting on the person that Sift never read, and none once read', async () => {
     await recordDecision(db, ACCOUNT, 'news', decision('archive'), { now: clock });
     expect(await timedTickPasses()).toBe(true);
     await workDue(store, options(), Infinity);
-    expect(await raw(db).all('SELECT message_id FROM suggestion_bodies')).toEqual([{ message_id: 'news' }]);
+    expect(await raw(db).all('SELECT message_id FROM read_bodies')).toEqual([{ message_id: 'news' }]);
     expect(await timedTickPasses()).toBe(false);
-    // Decided again, to be carried out once Sift is on: it no longer waits on the person, and its text is to go.
-    await recordDecision(db, ACCOUNT, 'news', decision('archive'), { carryOut: true, now: clock });
-    expect(await timedTickPasses()).toBe(true);
+    // Decided again: its text stays for its month, and nothing is due for it.
+    await recordDecision(db, ACCOUNT, 'news', decision('archive'), { now: clock });
+    expect(await timedTickPasses()).toBe(false);
   });
 
   it('begins one for a marked message to store as an example', async () => {

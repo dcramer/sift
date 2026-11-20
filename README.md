@@ -6,7 +6,7 @@ Sift helps you manage a Gmail inbox from a machine you own.
 - **Leave in inbox.** Mail no label fits, and anything you said you never want to miss, stays where it is.
 - **Rules** say what mail is, or what to do with it, without asking the model. Where you keep giving one sender's mail a different action than its label's, Sift proposes the rule.
 
-It suggests before it acts. Every decision appears in a dashboard for you to correct, and until you turn Sift on it changes Gmail only for mail you answer there yourself. It never deletes mail and cannot send any. A change to a message can be undone; an unsubscribe cannot.
+It suggests before it acts. Every decision appears in a dashboard for you to correct, and until you turn Sift on it changes Gmail only for mail you answer there yourself. It never deletes mail. It sends only what you write and press Send on, with Inbox on and your leave, and never anything by itself. A change to a message can be undone; an unsubscribe cannot.
 
 **Status: early.** In use on one real inbox, not yet turned on. Open work is in [TODO.md](TODO.md).
 

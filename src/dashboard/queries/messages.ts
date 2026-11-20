@@ -1,4 +1,4 @@
-import { actions, and, asc, decisions, eq, examples, messages, modelRuns, sql, suggestionBodies } from '../../store/query.ts';
+import { actions, and, asc, decisions, eq, examples, feedback, mailBodies, messages, modelRuns, sql, readBodies } from '../../store/query.ts';
 import type { Sql } from '../../store/sql.ts';
 import { unsubscribedAt, openPayload } from '../../store/actions.ts';
 import { storedFacts } from '../../store/messages.ts';
@@ -52,11 +52,17 @@ export async function messageDetail(db: Sql, scope: Scope, messageId: string): P
           inputTokens: sql<number>`coalesce(${modelRuns.inputTokens}, 0)`.mapWith(Number),
           outputTokens: sql<number>`coalesce(${modelRuns.outputTokens}, 0)`.mapWith(Number),
           durationMs: decisions.durationMs,
+          answerLabel: feedback.labelId,
+          answerDisposition: feedback.disposition,
         })
         .from(decisions)
         .leftJoin(modelRuns, eq(modelRuns.id, decisions.runId))
+        .leftJoin(feedback, eq(feedback.decisionId, decisions.id))
         .where(ofMessage)
-    ).map(({ id, ...rest }) => [id, rest] as const),
+    ).map(
+      ({ id, answerLabel, answerDisposition, ...rest }) =>
+        [id, { ...rest, answer: answerDisposition === null ? null : { labelId: answerLabel, disposition: answerDisposition } }] as const,
+    ),
   );
   const changes = await db
     .select({
@@ -94,12 +100,17 @@ export async function messageDetail(db: Sql, scope: Scope, messageId: string): P
   };
 }
 
-/** A message as sift holds it, as text and HTML: a suggestion's temporary copy, or an example the user made. */
+/** A message as sift holds it, as text and HTML: Inbox's whole copy, a suggestion's temporary one, or an example the user made. */
 async function storedBody(db: Sql, accountId: string, messageId: string): Promise<{ text: Confidential; html: Confidential | null } | null> {
+  const [whole] = await db
+    .select({ text: mailBodies.bodyText, html: mailBodies.bodyHtml })
+    .from(mailBodies)
+    .where(and(eq(mailBodies.accountId, accountId), eq(mailBodies.messageId, messageId)));
+  if (whole) return { text: openPart(db, accountId, messageId, 'text', whole.text)!, html: openPart(db, accountId, messageId, 'html', whole.html) };
   const [held] = await db
-    .select({ text: suggestionBodies.bodyText, html: suggestionBodies.bodyHtml })
-    .from(suggestionBodies)
-    .where(and(eq(suggestionBodies.accountId, accountId), eq(suggestionBodies.messageId, messageId)));
+    .select({ text: readBodies.bodyText, html: readBodies.bodyHtml })
+    .from(readBodies)
+    .where(and(eq(readBodies.accountId, accountId), eq(readBodies.messageId, messageId)));
   if (held) return { text: openPart(db, accountId, messageId, 'text', held.text)!, html: openPart(db, accountId, messageId, 'html', held.html) };
   const [kept] = await db
     .select({ text: examples.bodyText, html: examples.bodyHtml })

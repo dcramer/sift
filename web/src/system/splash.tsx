@@ -10,7 +10,7 @@ import { Wordmark } from './type.tsx';
 export function Splash({ title, art, children }: { title: ReactNode; art?: ReactNode; children: ReactNode }) {
   return (
     <div className="entry mx-auto flex min-h-svh w-full max-w-[64rem] flex-col px-5 md:px-10">
-      <header className="pt-8 md:pt-10">
+      <header className="pt-[calc(2rem+var(--safe-top))] md:pt-[calc(2.5rem+var(--safe-top))]">
         <Wordmark size="lg" />
       </header>
       <main className="flex flex-1 flex-col justify-end gap-6 pt-16 pb-10 md:justify-center md:gap-12 md:py-16">
@@ -18,7 +18,7 @@ export function Splash({ title, art, children }: { title: ReactNode; art?: React
         <h1 className="display">{title}</h1>
         {children}
       </main>
-      <footer className="flex gap-4 pb-8 text-sm text-muted-foreground">
+      <footer className="flex gap-4 pb-[calc(2rem+var(--safe-bottom))] text-sm text-muted-foreground">
         <FinePrint source />
       </footer>
     </div>

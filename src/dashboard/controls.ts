@@ -1,6 +1,6 @@
 import type { Sql } from '../store/sql.ts';
 import type { Reach } from '../store/inbox.ts';
-import type { InboxEstimate, LabelProposal, RuleDraft, RuleInbox } from './types.ts';
+import type { InboxEstimate, LabelProposal, MailAsk, MailChange, MailReach, RuleDraft, RuleInbox } from './types.ts';
 
 /**
  * What the dashboard can ask the rest of sift to do. The dashboard itself may not import Gmail, the
@@ -29,10 +29,18 @@ export interface Controls {
    */
   undo(db: Sql, actionId: number): Promise<string | null>;
   /**
+   * The person's own press on messages of theirs in the inbox, through the executor, Sift on or off. Messages no longer in
+   * the inbox are left as they are. Resolves with the changes that landed, which `undo` takes back, and how many Gmail did
+   * not take, which a failed call counts too, so those that landed before it can still be taken back.
+   */
+  changeMail(db: Sql, accountId: string, messageIds: readonly string[], change: MailChange['change']): Promise<{ actions: number[]; missed: number }>;
+  /**
    * What going through the newest `reach` of these of the person's inboxes would take, read from Gmail: how
    * many messages, how many of those likely need the model, and about what that costs.
    */
   inboxEstimate(db: Sql, mailboxes: readonly string[], reach: Reach): Promise<InboxEstimate>;
+  /** What copying these of the person's mailboxes for Inbox would take for each window it can keep, read from Gmail's counts. */
+  mailReach(db: Sql, mailboxes: readonly string[]): Promise<MailReach>;
   /**
    * After the user has corrected a decision: take back what sift last did to that message, so the new
    * decision can be carried out from where the message started.
@@ -54,6 +62,11 @@ export interface Controls {
    */
   draftRule(db: Sql, request: { accountId: string; goal: string }): Promise<RuleDraft>;
   /**
+   * Ask the person's model to turn their words into a filter on Inbox's list, looking up their senders as the rule
+   * drafter does. `today` is the reader's, `YYYY-MM-DD`. Rejects with a sentence for them when there is no model or the call failed.
+   */
+  askMail(db: Sql, request: { accountId: string; words: string; today: string }): Promise<MailAsk>;
+  /**
    * Copy a rule to Gmail as a filter (`on`), or take its filter out again. Rejects with a sentence for
    * the user when the rule cannot be a filter or Gmail refused.
    */
@@ -65,10 +78,32 @@ export interface Controls {
    * reporting on it. Resolves false when Google could not be reached; the mailbox is removed anyway.
    */
   revokeGmail(db: Sql, email: string): Promise<boolean>;
+  /**
+   * Send what the person wrote, as them, from one of their mailboxes, into `threadId` when it answers a message there
+   * (`sendMail`, src/actions/send.ts). Resolves with Gmail's id for it and its conversation; rejects with a sentence for
+   * them when they may not send or Gmail refused.
+   */
+  send(db: Sql, sending: { accountId: string; id: string; threadId?: string; mail: Outgoing }): Promise<{ id: string; threadId: string }>;
   /** Pass this person's mailboxes now instead of at the next tick. */
   checkNow(db: Sql): Promise<void>;
   /** How the last passes over these mailboxes went. */
   activity(mailboxes: string[]): Promise<Activity>;
+}
+
+interface Party {
+  address: string;
+  name?: string;
+}
+
+/** Mail the person wrote, as `sendMail` takes it: plain text; a reply names the Message-IDs it follows. */
+interface Outgoing {
+  from: Party;
+  to: Party[];
+  cc: Party[];
+  subject: string;
+  text: string;
+  inReplyTo?: string;
+  references?: string[];
 }
 
 interface Activity {
@@ -87,15 +122,19 @@ interface Activity {
  */
 export interface SignIn {
   hasClient(): boolean;
-  /** Google's sign-in address for a browser that should come back to `redirectUri`. */
-  url(redirectUri: string, state: string, challenge: string): string;
+  /**
+   * Google's sign-in address for a browser that should come back to `redirectUri`. `send`: a mailbox already connected,
+   * for which Google is asked only to let Sift send.
+   */
+  url(redirectUri: string, state: string, challenge: string, send: string | null): string;
   /**
    * Finish a sign-in. Who may is Google's to say: the client's test users, or anyone once it is published.
    * An account sift does not know is connected as another mailbox of `addTo` (the address of whoever is
-   * signed in and asked to add it), or else as a new person's. Resolves with the account's address;
-   * rejects with a message for the user.
+   * signed in and asked to add it), or else as a new person's. With `send`, it must be that mailbox, whose
+   * sign-in is replaced and which then may send if Google granted it. Records whether each mailbox may send.
+   * Resolves with the account's address; rejects with a message for the user.
    */
-  complete(redirectUri: string, code: string, verifier: string, addTo: string | null): Promise<string>;
+  complete(redirectUri: string, code: string, verifier: string, addTo: string | null, send: string | null): Promise<string>;
 }
 
 interface ModelSignIns {

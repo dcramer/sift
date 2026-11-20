@@ -3,6 +3,7 @@ import { ArrowRightIcon, ArrowUpRightIcon, PlusIcon } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { type Next, ProviderList, providerName, useProviderConnect } from '@/components/model-connect.tsx';
 import { type LabelProposal, type ManageState, api, useLoaded } from '@/lib/api.ts';
+import { signOut } from '@/lib/sign-out.ts';
 import { useAction } from '@/lib/action.ts';
 import { count } from '@/lib/format.ts';
 import { InboxFigures, useInboxEstimate } from '@/components/inbox.tsx';
@@ -61,7 +62,7 @@ export function SetUp({ signedInAs, onSettings, children }: { signedInAs: string
     ? {
         name: state.accounts.find((a) => a.primary)?.email ?? signedInAs,
         onSettings,
-        onSignOut: () => void api.signOut().then(() => window.location.assign('/')),
+        onSignOut: () => void signOut(),
       }
     : undefined;
   const steps = ['Connect a model', 'What you want', 'Your labels', 'Older mail'];

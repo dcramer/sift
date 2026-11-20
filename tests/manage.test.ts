@@ -17,7 +17,7 @@ import { MAX_LABELS, listLabels } from '../src/store/labels.ts';
 import { LEAVE_IN_INBOX } from '../src/triage/types.ts';
 import { recordDecision, settleDecision } from '../src/store/decisions.ts';
 import { EXAMPLE_KEEP_DAYS } from '../src/store/examples.ts';
-import { preferences, setActive } from '../src/store/preferences.ts';
+import { preferences, setActive, setMail } from '../src/store/preferences.ts';
 import { addRule, listRules } from '../src/store/rules.ts';
 import { ACCOUNT, DAY, FakeMailbox, UNSURE, facts, quietSources, rawMessage, storeExample, testModel, workDue } from './helpers.ts';
 import { type Reply, firstAccount, modelRun, raw, startDashboard, onePerson, withReason } from './fixtures.ts';
@@ -40,6 +40,11 @@ const controls: Controls = {
     return null;
   },
   inboxEstimate: async (_db, _mailboxes, reach) => (calls.push(`estimate ${reach}`), { messages: 40, model: 30, cost: 0.03 }),
+  mailReach: async () => {
+    const each = { messages: 1, bytes: 1, minutes: 1 };
+    return { year: each, three_years: each, all: each };
+  },
+  changeMail: async () => ({ actions: [], missed: 0 }),
   putBack: async (_db, _account, messageId) => {
     calls.push(`putBack ${messageId}`);
     if (messageId === 'gone') throw new Error('The message no longer exists.');
@@ -63,6 +68,10 @@ const controls: Controls = {
     calls.push(`draft ${accountId} ${goal}`),
     seal({ match: { fromDomain: ['example.org'] }, disposition: 'archive' as const, note: 'And another.' })
   ),
+  askMail: async (_db, { accountId, words, today }) => (
+    calls.push(`ask ${accountId} ${words} ${today}`),
+    seal({ filter: { domain: ['example.org'], since: '2026-11-01' }, note: 'Sift does not know what you answered.' })
+  ),
   ruleFilter: async (target, ruleId, on) => {
     calls.push(`filter ${ruleId} ${on ? 'on' : 'off'}`);
     await setRuleFilter(target, ruleId, ACCOUNT, on ? { filterId: 'f1', state: 'active', written: null } : { filterId: null, state: null, written: null }, 0);
@@ -79,6 +88,7 @@ const controls: Controls = {
     }
   ),
   revokeGmail: async (_db, email) => (calls.push(`revoke ${email}`), true),
+  send: async () => ({ id: 's', threadId: 's' }),
   checkNow: async () => void calls.push('check'),
   activity: async () => ({ running: true, lastPassAt: 5, problems: [], expired: [ACCOUNT] }),
 };
@@ -179,6 +189,20 @@ describe('managing sift from the dashboard', () => {
     for (const bad of [{}, { goal: '  ' }, { accountId: ACCOUNT, goal: 'x' }]) expect((await call('POST', '/api/rules/draft', bad)).status).toBe(400);
     expect(calls).toEqual([`draft ${ACCOUNT} Archive everything from example.org`]);
     expect((await call('GET', '/api/rules')).body['rules']).toEqual([]);
+  });
+
+  it('turns words into a filter on Inbox through the model, only while Inbox is on', async () => {
+    const { call } = await start();
+    const ask = { words: ' invoices this month ', today: '2026-11-19' };
+    expect(await call('POST', '/api/mail/ask', ask)).toMatchObject({ status: 409, body: { error: 'Turn Inbox on first.' } });
+    await setMail(db, true);
+    expect((await call('POST', '/api/mail/ask', ask)).body).toEqual({
+      filter: { domain: ['example.org'], since: '2026-11-01' },
+      note: 'Sift does not know what you answered.',
+    });
+    for (const bad of [{ words: 'x' }, { words: ' ', today: '2026-11-19' }, { words: 'x', today: 'today' }])
+      expect((await call('POST', '/api/mail/ask', bad)).status).toBe(400);
+    expect(calls).toEqual([`ask ${ACCOUNT} invoices this month 2026-11-19`]);
   });
 
   it('asks the model for labels from what the person wants, and makes the ones they keep when they have none, all or none', async () => {
@@ -774,9 +798,10 @@ describe('signing in with Google', () => {
   let hasClient: boolean;
   const signIn: SignIn = {
     hasClient: () => hasClient,
-    url: (redirectUri, state, challenge) => `https://accounts.example/auth?redirect=${encodeURIComponent(redirectUri)}&state=${state}&challenge=${challenge}`,
-    complete: async (redirectUri, code, _verifier, addTo) => {
-      completed.push(`${redirectUri} ${code} addTo=${addTo}`);
+    url: (redirectUri, state, challenge, send) =>
+      `https://accounts.example/auth?redirect=${encodeURIComponent(redirectUri)}&state=${state}&challenge=${challenge}${send ? `&send=${send}` : ''}`,
+    complete: async (redirectUri, code, _verifier, addTo, send) => {
+      completed.push(`${redirectUri} ${code} addTo=${addTo}${send ? ` send=${send}` : ''}`);
       if (code === 'refused') throw new Error('invalid_grant');
       if (code === 'second') {
         await connectAccount(store, 'work@example.com', '1', 0, 1);
@@ -856,6 +881,29 @@ describe('signing in with Google', () => {
     expect(completed).toHaveLength(1);
   });
 
+  it('issues the session again once it is a day old, as the page asks who is signed in, so using Sift within the month never signs anyone out', async () => {
+    let now = 1000;
+    const { call } = await startDashboard(people(store), { controls, signIn, sessionSecret: SECRET, now: () => now });
+    const first = { cookie: cookieFrom((await callback(call, await call('GET', '/auth/login'), 'abc')).headers) };
+    expect((await call('GET', '/api/session', undefined, first)).headers['set-cookie']).toBeUndefined();
+
+    now += 29 * 86_400_000;
+    const renewed = await call('GET', '/api/session', undefined, first);
+    expect(renewed.body).toMatchObject({ email: ACCOUNT });
+    expect(String(renewed.headers['set-cookie'])).toMatch(/^sift_session=[^;]+; Path=\/; Max-Age=2592000; HttpOnly; SameSite=Lax$/);
+    const second = { cookie: cookieFrom(renewed.headers) };
+
+    now += 2 * 86_400_000;
+    expect((await call('GET', '/api/manage', undefined, first)).status).toBe(401);
+    expect((await call('GET', '/api/manage', undefined, second)).status).toBe(200);
+  });
+
+  it('says which build of the page it came with, signed in or not', async () => {
+    const built = await startDashboard(people(store), { signIn, sessionSecret: SECRET, build: 'build-2' });
+    expect((await built.call('GET', '/api/session')).body).toMatchObject({ build: 'build-2' });
+    expect((await (await startDashboard(people(store), { build: 'build-2' })).call('GET', '/api/session')).body).toMatchObject({ build: 'build-2' });
+  });
+
   it('comes back to where the browser started signing in, and only ever to a page of its own', async () => {
     const { call } = await startWithSignIn();
     const from = async (to: string) => (await callback(call, await call('GET', `/auth/login?to=${encodeURIComponent(to)}`), 'abc')).headers['location'];
@@ -911,6 +959,23 @@ describe('signing in with Google', () => {
       cookie: `${cookie.cookie}; ${cookieFrom(asked.headers)}`,
     });
     expect(denied.headers['location']).toBe('/?settings=1&signin=Google%20did%20not%20grant%20access.');
+  });
+
+  it('asks Google to let Sift send only for a mailbox of whoever is signed in, and only they finish it', async () => {
+    const { call } = await startWithSignIn();
+    expect((await call('GET', `/auth/login?grant=send&mailbox=${ACCOUNT}`)).headers['location']).toBe('/');
+    const cookie = { cookie: cookieFrom((await callback(call, await call('GET', '/auth/login'), 'abc')).headers) };
+    expect((await call('GET', '/auth/login?grant=send&mailbox=bravo@example.net', undefined, cookie)).headers['location']).toBe('/');
+
+    const grant = await call('GET', `/auth/login?grant=send&mailbox=${ACCOUNT}&to=/inbox`, undefined, cookie);
+    expect(String(grant.headers['location'])).toContain(`&send=${ACCOUNT}`);
+    // Signed out before Google came back.
+    expect(String((await callback(call, grant, 'abc')).headers['location'])).toContain('let%20Sift%20send');
+    const again = await call('GET', `/auth/login?grant=send&mailbox=${ACCOUNT}&to=/inbox`, undefined, cookie);
+    const back = await callback(call, again, 'abc', cookie);
+    expect(completed.at(-1)).toContain(`addTo=null send=${ACCOUNT}`);
+    expect(back.headers['location']).toBe('/inbox');
+    expect(String(back.headers['set-cookie'])).not.toContain('sift_session');
   });
 
   it('completes a sign-in only in the browser that started it', async () => {

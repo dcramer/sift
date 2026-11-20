@@ -6,6 +6,13 @@
 @import '@fontsource/ibm-plex-mono/500.css';
 
 @custom-variant dark (&:is(.dark *));
+/* The phone's layout (`phone:`, and what `md:` leaves out) is for a short screen as well as a narrow one, so a phone on
+   its side keeps it. Tailwind's own `md:` and `max-md:` go by width alone. */
+@theme {
+  --breakpoint-md: initial;
+}
+@custom-variant md (@media (width >= 48rem) and (height >= 30rem));
+@custom-variant phone (@media not ((width >= 48rem) and (height >= 30rem)));
 
 /* The only sizes a class can set. Display sizes (titles, figures, the wordmark) are the role classes below.
    Not inline: a size class reads its variable, so a part can set the scale for what is inside it (`.entry`). */
@@ -42,6 +49,11 @@
 
 :root {
   color-scheme: dark;
+  /* How tall the phone's top bar is while it shows (the bar measures itself), so what sticks under it (a day's heading) sits below it. */
+  --bar: 0px;
+  @media (width < 48rem), (height < 30rem) {
+    --bar: calc(64px + var(--safe-top));
+  }
 
   /* Type, by role. */
   --face-wordmark: var(--typeface-wordmark), 'Bricolage Grotesque Variable', ui-sans-serif, system-ui, sans-serif;
@@ -88,6 +100,13 @@
   /* How far a row's hover reaches past its text when the table sits straight on the page, so the text is
      never flush against the edge of the highlight; on a panel too. Inside a sheet the gutter does this instead. */
   --bleed: 0.75rem;
+
+  /* Where the screen's own edges reach into the page, in an installed app drawn to them (`viewport-fit=cover`): the
+     status bar, the notch, the home indicator. Zero in a browser tab. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
 
   /* One height for everything pressed or typed into in a row or a toolbar, so they line up. */
   --control: 2rem;
@@ -165,6 +184,22 @@
     letter-spacing: -0.03em;
   }
   /* A section's heading, on a page or in a panel: clearly larger than a name, so it never reads as the first row. */
+  /* A list's name on a phone: a section heading's size, on its one line under the bar. */
+  @media (width < 48rem), (height < 30rem) {
+    .statement.list-title {
+      font-size: 22px;
+      line-height: 1.15;
+      letter-spacing: -0.03em;
+    }
+  }
+  /* An opened message's subject: a page's title on a desktop, a line at reading size on a phone, so its text starts high. */
+  @media (width < 48rem), (height < 30rem) {
+    .statement.subject {
+      font-size: var(--text-reading);
+      line-height: 1.3;
+      letter-spacing: -0.02em;
+    }
+  }
   .heading {
     font-size: 22px;
     line-height: 1.15;
@@ -194,7 +229,7 @@
     line-height: 0.98;
     letter-spacing: -0.05em;
     text-wrap: balance;
-    @media (width >= 48rem) {
+    @media (width >= 48rem) and (height >= 30rem) {
       font-size: clamp(44px, 7.5vw, 88px);
     }
   }
@@ -271,11 +306,21 @@
     }
   }
 
-  /* On a touch screen, controls are tall enough for a thumb. */
+  /* On a touch screen, controls are big enough for a thumb both ways, and a long press on one, or on a row that opens,
+     selects no text and offers no callout. */
   @media (pointer: coarse) {
     .press,
     .field {
       min-height: 2.75rem;
+    }
+    .press {
+      min-width: 2.75rem;
+    }
+    .press,
+    .row[tabindex] {
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
     }
   }
 
@@ -303,12 +348,24 @@
   }
   html {
     @apply font-sans;
+    /* Android reloads the page when it is pulled down from the top, which in the installed app throws away what was open. */
+    overscroll-behavior-y: none;
   }
   body {
     @apply bg-background text-foreground;
     font-size: var(--text-base);
     line-height: var(--text-base--line-height);
     -webkit-font-smoothing: antialiased;
+  }
+  /* The status bar is drawn over the page in the installed app: what scrolls under it is covered by the page's own
+     colour, as if it stopped at the bar. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0 0 auto;
+    z-index: 40;
+    height: var(--safe-top);
+    background: var(--background);
   }
   /* Focus is a highlighter outline, the same yellow that marks what needs you. In this layer so that a part's
      `outline-none` wins: a menu, a select's list and their items show focus by their fill instead. */

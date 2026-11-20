@@ -12,6 +12,8 @@ import {
   query,
   settings,
   settingsActive,
+  settingsInbox,
+  mailWindow,
   settingsFromMenu,
   settled,
   test,
@@ -251,5 +253,50 @@ test.describe('Check now', () => {
       await page.reload();
       await expect(check.getByText('Last checked just now.')).toBeVisible({ timeout: 1000 });
     }).toPass();
+  });
+});
+
+test.describe('Inbox in Settings', () => {
+  test('turning it on asks how far back, with what each would take, and keeps what was chosen', async ({ page }) => {
+    await page.goto('/?settings=1');
+    await settingsInbox(page).getByRole('button', { name: 'Turn on', exact: true }).click();
+    const choices = mailWindow(page).getByRole('radiogroup', { name: 'How far back' });
+    await expect(choices.getByRole('radio', { name: /^The last year/ })).toHaveAttribute('aria-checked', 'true');
+    await expect(choices.getByRole('radio', { name: /^The last year/ })).toContainText('About 8,200 messages · 247 MB · 1 h 43 min to copy');
+    await expect(choices.getByRole('radio', { name: /^All of it/ })).toContainText('About 47K messages · 1.4 GB · 9 h 45 min to copy');
+    await choices.getByRole('radio', { name: /^The last three years/ }).click();
+    await mailWindow(page).getByRole('button', { name: 'Turn on', exact: true }).click();
+    await expect(mailWindow(page)).toHaveCount(0);
+    await expect(settingsInbox(page).getByRole('button', { name: 'Turn off', exact: true })).toBeVisible();
+    await expect(settingsInbox(page).getByText(/the last three years/i)).toBeVisible();
+  });
+
+  test.describe('while on', () => {
+    test.use({ variant: 'inbox' });
+
+    test('shows the copy going, and widening or narrowing the window changes it, narrowing only after asking', async ({ page }) => {
+      await page.goto('/?settings=1');
+      await expect(settingsInbox(page).getByText('Copying the last year')).toBeVisible();
+      await expect(settingsInbox(page).getByText(/^1,240 of about 8,240/)).toBeVisible();
+
+      await settingsInbox(page).getByRole('button', { name: 'Change…' }).click();
+      await mailWindow(page)
+        .getByRole('radio', { name: /^All of it/ })
+        .click();
+      await mailWindow(page).getByRole('button', { name: 'Keep', exact: true }).click();
+      await expect(mailWindow(page)).toHaveCount(0);
+      await expect(settingsInbox(page).getByText(/all of it/i)).toBeVisible();
+
+      await settingsInbox(page).getByRole('button', { name: 'Change…' }).click();
+      await mailWindow(page)
+        .getByRole('radio', { name: /^The last year/ })
+        .click();
+      await mailWindow(page).getByRole('button', { name: 'Keep less' }).click();
+      const asked = page.getByRole('dialog', { name: 'Delete what Sift copied from before the last year?' });
+      await expect(asked.getByText('Mail in your inbox stays, however old.')).toBeVisible();
+      await asked.getByRole('button', { name: 'Delete', exact: true }).click();
+      await expect(mailWindow(page)).toHaveCount(0);
+      await expect(settingsInbox(page).getByText(/the last year/i)).toBeVisible();
+    });
   });
 });
