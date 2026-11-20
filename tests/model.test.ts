@@ -19,7 +19,7 @@ import {
 } from '../src/model/models.ts';
 import { recordSync } from '../src/store/accounts.ts';
 import { listLabels, updateLabel } from '../src/store/labels.ts';
-import { openUserDb, raw } from './fixtures.ts';
+import { connectGmail, fakeGoogle, openUserDb, raw } from './fixtures.ts';
 import { recordDecision } from '../src/store/decisions.ts';
 import { addRule, listRules } from '../src/store/rules.ts';
 import { contactOf, contacts, domainFacts, rememberCorrespondent, senderFacts } from '../src/store/senders.ts';
@@ -32,6 +32,8 @@ function evidence(overrides: Partial<Evidence['sender']> = {}, body: string | nu
   const f = facts({ headers: { 'list-unsubscribe': '<https://example.com/u>' } });
   return { facts: f, known: deriveFacts(f), body, sender: { messagesSeen: 1, userHasWritten: false, ...overrides } };
 }
+
+const fake = fakeGoogle();
 
 const stage = (verdict: Verdict | JudgeFailure, ev: Evidence = evidence()) =>
   modelStage({ gather: async () => ev, judge: async () => verdict, labels: SAMPLE_LABELS });
@@ -565,29 +567,24 @@ describe('gatherEvidence', () => {
     const db = await openUserDb(ACCOUNT);
     const f = facts();
     await recordSync(db, ACCOUNT, [f], '2');
-    let lookups = 0;
-    const fail = async () => {
-      throw new Error('not a reply, so the thread is not read');
-    };
-    const sources = {
-      db,
-      api: { getContent: async () => ({ text: 'hello', html: null, facts: { hasAttachments: false } }), getThread: fail },
-      mailbox: { hasSentTo: async () => (lookups++, false) },
-      now: () => 1000,
-    };
+    const { api, mailbox, gmail } = connectGmail(fake.google);
+    gmail.deliver({ id: f.messageId, from: 'news@example.com', text: 'hello' });
+    const sources = { db, api, mailbox, now: () => 1000 };
 
     const first = await gatherEvidence(sources, f);
     await gatherEvidence(sources, f);
     expect(first).toMatchObject({ body: 'hello', sender: { messagesSeen: 1, userHasWritten: false, ownerLabels: [] } });
-    expect(lookups).toBe(1);
+    expect(gmail.asked('users.messages.list')).toHaveLength(1);
+    expect(gmail.asked('users.threads.get')).toEqual([]);
   });
 
   it('reports unknown instead of failing when a lookup errors', async () => {
     const db = await openUserDb(ACCOUNT);
-    const fail = async () => {
-      throw new Error('network');
-    };
-    const result = await gatherEvidence({ db, api: { getContent: fail, getThread: fail }, mailbox: { hasSentTo: fail } }, facts());
+    const { api, mailbox, gmail } = connectGmail(fake.google);
+    gmail.deliver({ id: 'm1', from: 'news@example.com' });
+    gmail.fail('users.messages.get', { status: 403, reason: 'userRateLimitExceeded' });
+    gmail.fail('users.messages.list', { status: 403, reason: 'userRateLimitExceeded' });
+    const result = await gatherEvidence({ db, api, mailbox }, facts());
     expect(result).toMatchObject({ body: null, sender: { userHasWritten: null } });
   });
 });

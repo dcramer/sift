@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { gatherEvidence } from '../src/work/evidence.ts';
 import { readContent } from '../src/gmail/body.ts';
 import { recordSync } from '../src/store/accounts.ts';
-import { openUserDb } from './fixtures.ts';
+import { connectGmail, fakeGoogle, openUserDb } from './fixtures.ts';
 import { storedFacts } from '../src/store/messages.ts';
 import { describeFacts } from '../src/triage/facts.ts';
 import { htmlFacts } from '../src/triage/html.ts';
 import { ACCOUNT, b64, facts } from './helpers.ts';
+
+const fake = fakeGoogle();
 
 const CAMPAIGN = `<html><body>
   <a href="https://example.us1.list-manage.com/track/click?u=abc&amp;id=1">Shop the sale</a>
@@ -109,11 +111,15 @@ describe('content facts', () => {
     await recordSync(db, ACCOUNT, [f], '2');
     expect(await storedFacts(db, ACCOUNT, f.messageId)).not.toHaveProperty('trackingPixel');
 
-    const content = { text: 'Shop the sale', html: CAMPAIGN, facts: { hasAttachments: true, ...htmlFacts(CAMPAIGN, 'example.com') } };
-    const evidence = await gatherEvidence(
-      { db, api: { getContent: async () => content, getThread: async () => null }, mailbox: { hasSentTo: async () => false } },
-      f,
-    );
+    const { api, mailbox, gmail } = connectGmail(fake.google);
+    gmail.deliver({
+      id: f.messageId,
+      from: 'Shop <news@example.com>',
+      text: 'Shop the sale',
+      html: CAMPAIGN,
+      attachments: [{ filename: 'lookbook.pdf', mimeType: 'application/pdf', data: '%PDF' }],
+    });
+    const evidence = await gatherEvidence({ db, api, mailbox }, f);
     expect(await storedFacts(db, ACCOUNT, f.messageId)).toMatchObject({ trackingPixel: true, trackedLinks: true, hasAttachments: true });
     const told = describeFacts(evidence.known);
     expect(told).toContain('Has attachments');

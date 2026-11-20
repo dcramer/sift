@@ -310,20 +310,21 @@ export async function startChatGPTRedirect(deviceId: string, now: () => number =
  * expires, opening `url` again gives a new address the same sign-in takes.
  */
 export async function finishChatGPTRedirect(signIns: SignIns, pending: PendingRedirect, address: string, now: () => number = Date.now): Promise<void> {
-  if (now() > pending.expiresAt) throw new Error('That sign-in expired. Start again.');
+  if (now() > pending.expiresAt) throw new Refusal('That sign-in expired. Start again.');
   let back: URL;
   try {
     back = new URL(address);
   } catch {
-    throw new Error("Paste the whole address from the browser's address bar.");
+    throw new Refusal("Paste the whole address from the browser's address bar.");
   }
-  if (`${back.origin}${back.pathname}` !== SIGN_IN.redirect) throw new Error(`That is not the address ChatGPT sent you to, which starts ${SIGN_IN.redirect}.`);
+  if (`${back.origin}${back.pathname}` !== SIGN_IN.redirect)
+    throw new Refusal(`That is not the address ChatGPT sent you to, which starts ${SIGN_IN.redirect}.`);
   const refused = back.searchParams.get('error');
-  if (refused) throw new Error(`ChatGPT did not sign you in (${refused}).`);
-  if (back.searchParams.get('state') !== pending.state) throw new Error('That address is from an earlier sign-in. Open ChatGPT from here again.');
+  if (refused) throw new Refusal(`ChatGPT did not sign you in (${refused}).`);
+  if (back.searchParams.get('state') !== pending.state) throw new Refusal('That address is from an earlier sign-in. Open ChatGPT from here again.');
   const code = back.searchParams.get('code');
   const clientId = back.searchParams.get('client_id');
-  if (!code || !clientId) throw new Error('That address is missing part of what ChatGPT sent. Copy all of it.');
+  if (!code || !clientId) throw new Refusal('That address is missing part of what ChatGPT sent. Copy all of it.');
 
   const response = await tracedFetch(SIGN_IN.token, {
     method: 'POST',
@@ -337,13 +338,13 @@ export async function finishChatGPTRedirect(signIns: SignIns, pending: PendingRe
       resource: SIGN_IN.resource,
     }),
   });
-  if (!response.ok) throw new Error(`OpenAI refused the sign-in (${response.status}). Open ChatGPT again.`);
+  if (!response.ok) throw new Refusal(`OpenAI refused the sign-in (${response.status}). Open ChatGPT again.`);
   const token = (await response.json()) as Record<string, unknown>;
   const scopes = typeof token['scope'] === 'string' ? token['scope'].split(/\s+/).filter(Boolean) : [];
   const { access_token: access, refresh_token: refresh, expires_in: expiresIn } = token;
   if (typeof access !== 'string' || typeof refresh !== 'string' || typeof expiresIn !== 'number')
-    throw new Error('OpenAI answered the sign-in with something Sift cannot use.');
-  if (!scopes.includes('chatgpt.tokens.use.direct')) throw new Error('ChatGPT did not allow Sift to use your plan. Open ChatGPT again and allow it.');
+    throw new Refusal('OpenAI answered the sign-in with something Sift cannot use.');
+  if (!scopes.includes('chatgpt.tokens.use.direct')) throw new Refusal('ChatGPT did not allow Sift to use your plan. Open ChatGPT again and allow it.');
   await credentialStore(signIns).modify(CHATGPT, async () => ({
     type: 'oauth',
     access,

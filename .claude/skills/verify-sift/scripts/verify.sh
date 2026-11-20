@@ -2,7 +2,7 @@
 # Drives one disposable sift dashboard. Everything for a run lives in <dir>:
 #   home/       the sift home (seeded, synthetic)     removed by `down`
 #   evidence/   screenshots, snapshots, query output   kept by `down`
-#   pid port cookie dashboard.log gmail.json (the fake Gmail's filters, and with --inbox its messages' labels) sent.json (mail sent)
+#   pid port cookie dashboard.log google.json (the fake Google, tests/google.ts: every mailbox, its mail, labels and filters, and what was sent)
 # Usage: verify.sh up <dir> [--bare | --on | --chatgpt | --inbox] [--listing] | doctor <dir> | ab <dir> <agent-browser args...> | sql <dir> <query> | down <dir>
 set -euo pipefail
 
@@ -45,14 +45,14 @@ case "$cmd" in
         *) echo "up: unknown option $flag" >&2; exit 2 ;;
       esac
     done
-    node --disable-warning=ExperimentalWarning "$ROOT/.claude/skills/verify-sift/scripts/seed.ts" "$dir/home" "$dir/gmail.json" $variant > "$dir/cookie"
+    node --disable-warning=ExperimentalWarning "$ROOT/.claude/skills/verify-sift/scripts/seed.ts" "$dir/home" "$dir/google.json" $variant > "$dir/cookie"
     port="$(node -e 'const s=require("node:net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
     echo "$port" > "$dir/port"
-    # The real app on this home, as `sift run` starts it, with stand-ins for Gmail and the model (stand-ins.ts says
+    # The real app on this home, as `sift run` starts it, with the fake Google and a stand-in model (stand-ins.ts says
     # what they answer) and no minute's tick, on a build of the code as it is now: Next.js's cache makes that seconds.
     cd "$ROOT"
     pnpm -s build:web > "$dir/build.log" 2>&1 || { tail -20 "$dir/build.log" >&2; exit 1; }
-    nohup node --disable-warning=ExperimentalWarning "$ROOT/.claude/skills/verify-sift/scripts/serve.ts" "$dir/home" "$port" "$dir/gmail.json" $listing > "$dir/dashboard.log" 2>&1 &
+    nohup node --disable-warning=ExperimentalWarning "$ROOT/.claude/skills/verify-sift/scripts/serve.ts" "$dir/home" "$port" "$dir/google.json" $listing > "$dir/dashboard.log" 2>&1 &
     echo $! > "$dir/pid"
     for _ in $(seq 1 240); do
       grep -q 'Sift is running on the seeded home' "$dir/dashboard.log" 2>/dev/null && break
@@ -92,7 +92,7 @@ case "$cmd" in
       for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.25; done
       kill -0 "$pid" 2>/dev/null && kill -9 "$pid"
     fi
-    rm -rf "$dir/home" "$dir/pid" "$dir/port" "$dir/cookie" "$dir/gmail.json"
+    rm -rf "$dir/home" "$dir/pid" "$dir/port" "$dir/cookie" "$dir/google.json"
     echo "stopped; evidence kept in $dir/evidence"
     ;;
   *) echo "unknown command: $cmd" >&2; exit 2 ;;

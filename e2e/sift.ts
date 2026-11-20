@@ -1,10 +1,11 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test as base, expect, type Locator, type Page } from '@playwright/test';
 import { FRAME_POLICY, PAGE_HEADERS } from '../src/dashboard/policy.ts';
+import { FakeGoogle } from '../tests/google.ts';
 
 const SCRIPTS = resolve(import.meta.dirname, '../.claude/skills/verify-sift/scripts');
 export const SEED = join(SCRIPTS, 'seed.ts');
@@ -15,7 +16,7 @@ export const HELD = 'SIFT_E2E_HELD';
 /**
  * `full` is verify-sift's seed (its SKILL.md says what is in it); `bare` leaves the work mailbox without labels, so the page is the setting-up steps;
  * `on` has had a pass with Sift on (`--on` in the seed); `chatgpt` reaches its model through a ChatGPT plan; `inbox` has Inbox on, with the
- * text of the inbox's mail, a fake Gmail that holds the seed's mail, and may send from its first mailbox (`--inbox`).
+ * text of the inbox's mail, and may send from its first mailbox (`--inbox`).
  */
 export type Variant = 'full' | 'bare' | 'on' | 'chatgpt' | 'inbox';
 
@@ -46,8 +47,8 @@ const framePolicy = (text: string) => text.includes('/api/message/html?') || FRA
 /** A Sentry project on a port nothing listens on, on this machine: what the server sends there is refused, and nothing leaves it. */
 export const SENTRY_DSN = 'http://key@127.0.0.1:1/1';
 
-/** Starts verify-sift's `serve.ts` (the app, with stand-ins for Gmail and the model) on a copy of the seeded home. */
-async function start(variant: Variant, cloud: boolean, listing: boolean, signedOut: boolean, sentry: boolean) {
+/** Starts verify-sift's `serve.ts` (the app, reaching the fake Google and a stand-in model) on a copy of the seeded home. */
+async function start(variant: Variant, cloud: boolean, listing: boolean, sentry: boolean) {
   const template = JSON.parse(process.env[`${TEMPLATES}_${variant}`] ?? 'null') as { dir: string; cookie: string } | null;
   if (!template) throw new Error('e2e/global-setup.ts did not run');
   const dir = mkdtempSync(join(tmpdir(), 'sift-e2e-run-'));
@@ -62,16 +63,14 @@ async function start(variant: Variant, cloud: boolean, listing: boolean, signedO
         join(SCRIPTS, 'serve.ts'),
         join(dir, 'home'),
         String(port),
-        join(dir, 'gmail.json'),
+        join(dir, 'google.json'),
         ...(listing ? ['--listing'] : []),
       ],
       {
         stdio: ['ignore', 'pipe', 'pipe'],
-        // Signed out, Sift is set up to sign in with a Google client that is made up: nothing goes to Google unless pressed.
         env: {
           ...process.env,
           SIFT_CLOUD: String(cloud),
-          ...(signedOut ? { SIFT_GOOGLE_CLIENT_ID: 'synthetic', SIFT_GOOGLE_CLIENT_SECRET: 'synthetic' } : {}),
           ...(sentry ? { SENTRY_DSN: SENTRY_DSN } : {}),
         },
         // A group of its own, with the Next.js server it starts, to end together.
@@ -91,12 +90,21 @@ async function start(variant: Variant, cloud: boolean, listing: boolean, signedO
     return started ? { port, child } : serve(tries - 1);
   };
   const { port, child } = await withTimeout(serve(3), 30_000, 'serve.ts did not start');
-  const sentFile = join(dir, 'sent.json');
+  /** Google as the server last wrote it back. */
+  const google = () => FakeGoogle.restore(JSON.parse(readFileSync(join(dir, 'google.json'), 'utf8')) as ReturnType<FakeGoogle['save']>);
+  const seeded = new Set([...google().mailboxes.values()].flatMap((m) => m.sent().map((s) => s.id)));
   return {
     url: `http://127.0.0.1:${port}`,
     cookie: template.cookie,
-    /** What the stand-in Gmail was asked to send, oldest first. */
-    sent: () => (existsSync(sentFile) ? (JSON.parse(readFileSync(sentFile, 'utf8')) as { mailbox: string; id: string; threadId: string; raw: string }[]) : []),
+    google,
+    /** What Gmail was asked to send since the seed, oldest first. */
+    sent: () =>
+      [...google().mailboxes.values()].flatMap((m) =>
+        m
+          .sent()
+          .filter((s) => !seeded.has(s.id))
+          .map((s) => ({ mailbox: m.address, ...s })),
+      ),
     stop: async () => {
       const exited = new Promise((done) => child.once('exit', done));
       // Not Next.js's own stop, which waits for a run's step under way: one may wait on Gmail for good (`listing`).
@@ -123,7 +131,7 @@ export const test = base.extend<{
   variant: ['full', { option: true }],
   /** `SIFT_CLOUD`: a Sift run as a service. False is someone's own copy. */
   cloud: [false, { option: true }],
-  /** Gmail still listing any search of the inbox, for good, so applying a rule goes on until stopped. */
+  /** The inbox also holding 1,200 of the Store's sales, and Gmail never answering a search's second page, so applying a rule to them goes on until stopped. */
   listing: [false, { option: true }],
   /** A visitor nobody is signed in as, on a Sift that can sign them in. */
   signedOut: [false, { option: true }],
@@ -131,8 +139,8 @@ export const test = base.extend<{
   sentry: [false, { option: true }],
   /** Console errors a test expects, by part of their text: `status of 409` where the server refuses and the page says why. */
   allow: [[], { option: true }],
-  sift: async ({ variant, cloud, listing, signedOut, sentry }, use) => {
-    const sift = await start(variant, cloud, listing, signedOut, sentry);
+  sift: async ({ variant, cloud, listing, sentry }, use) => {
+    const sift = await start(variant, cloud, listing, sentry);
     await use(sift);
     await sift.stop();
   },
@@ -397,7 +405,7 @@ export const inboxRow = (page: Page, subject: string) =>
 export const composer = (page: Page, title: 'New message' | 'Reply' | 'Reply to all' | 'Forward') =>
   page.getByRole(title === 'New message' ? 'dialog' : 'region', { name: title, exact: true });
 
-/** A message the stand-in Gmail was asked to send, its headers unfolded by name and its text decoded. */
+/** A message Gmail was asked to send, its headers unfolded by name and its text decoded. */
 export function readSent(raw: string): { headers: Record<string, string>; text: string } {
   const split = raw.indexOf('\r\n\r\n');
   const lines = raw.slice(0, split).replaceAll('\r\n ', ' ').split('\r\n');

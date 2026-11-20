@@ -4,22 +4,33 @@ import { type IncomingMessage, type ServerResponse, createServer, request } from
 import { Readable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { PGlite } from '@electric-sql/pglite';
-import { beforeEach, inject, onTestFinished } from 'vitest';
+import { type FauxResponseStep, createModels, fauxProvider } from '@earendil-works/pi-ai';
+import { afterAll, afterEach, beforeAll, beforeEach, inject, onTestFinished } from 'vitest';
 import { type DashboardOptions, createDashboard } from '../src/dashboard/server.ts';
 import type { People } from '../src/store/people.ts';
 import { PARSERS, pglite } from '../src/store/db.ts';
 import type { Sql } from '../src/store/sql.ts';
 import { type Store, storeOn } from '../src/store/store.ts';
 import { type Keyring, loadKeyring } from '../src/secrets.ts';
-import { type Account, connectAccount, listAccounts, recordSync } from '../src/store/accounts.ts';
+import { type Account, connectAccount, listAccounts, recordSync, userOf } from '../src/store/accounts.ts';
 import { recordDecision } from '../src/store/decisions.ts';
 import { setRuleFilter } from '../src/store/filters.ts';
 import { addRule } from '../src/store/rules.ts';
+import { addLabels } from '../src/store/labels.ts';
 import { rememberCorrespondent } from '../src/store/senders.ts';
 import { conditionsHash } from '../src/store/content.ts';
 import { finishRun, startRun } from '../src/store/runs.ts';
 import type { Usage } from '../src/triage/stages/model.ts';
-import { ACCOUNT, withSampleLabels } from './helpers.ts';
+import type { Decision } from '../src/triage/types.ts';
+import { ACCOUNT, tempDir, withSampleLabels } from './helpers.ts';
+import { FakeGoogle, SECRETS, serveGoogle } from './google.ts';
+import { loadConfig } from '../src/config.ts';
+import { clientFor, installClient } from '../src/gmail/auth.ts';
+import { createGmailApi } from '../src/gmail/api.ts';
+import { createGmailMailbox } from '../src/gmail/mailbox.ts';
+import type { ChosenModel } from '../src/model/models.ts';
+import { type Sift, createSift } from '../src/sift/sift.ts';
+import type { Work } from '../src/work/run.ts';
 
 /*
  * One database per test file, loaded from the image global-setup.ts migrated once for the whole run,
@@ -339,4 +350,171 @@ export async function rowsBy(column: 'user_id' | 'account_id'): Promise<Record<s
       }),
     ),
   );
+}
+
+/**
+ * Google, in memory, for every test in the file that calls this (`tests/google.ts`): each test starts with no mailboxes and
+ * no sign-ins, and a request to a Google address the fake does not answer fails the test rather than reaching the network.
+ */
+export function fakeGoogle(): { readonly google: FakeGoogle } {
+  const holder = { google: new FakeGoogle() };
+  const server = serveGoogle(() => holder.google);
+  beforeAll(() => server.listen());
+  afterEach(() => {
+    holder.google = new FakeGoogle();
+    server.reset();
+  });
+  afterAll(() => server.close());
+  return holder;
+}
+
+/**
+ * Sift's own Gmail client for `address` in `google`, signed in as a sign-in that granted it would be (`send`: with
+ * `gmail.send`), unpaced; and the mailbox it reaches. `token`: signed in with that sign-in instead, given earlier by
+ * `google.grant`, for a test that ends it (`google.expire`).
+ */
+export function connectGmail(google: FakeGoogle, address = ACCOUNT, { send = false, token }: { send?: boolean; token?: string } = {}) {
+  const client = clientFor(SECRETS, token ?? google.grant(address, { send }));
+  const pace = async () => {};
+  return { api: createGmailApi(client, pace), mailbox: createGmailMailbox(client, pace), gmail: google.mailbox(address) };
+}
+
+const SITE = 'http://localhost:3000';
+
+/** Every `/api/` route a `startSift` browser in this test file was answered 200 by, as `GET /api/rules`. */
+export const answeredRoutes = new Set<string>();
+
+/** pi-ai's faux provider as the person's model, for `startSift`: `answers` queues what its next calls reply, one a call. */
+export function fauxModel(): { chosen: ChosenModel; answers: (...replies: FauxResponseStep[]) => void } {
+  const faux = fauxProvider();
+  const models = createModels();
+  models.setProvider(faux.provider);
+  return { chosen: { spec: 'faux/model', models, model: faux.getModel(), reasoning: 'low' }, answers: (...replies) => faux.setResponses(replies) };
+}
+
+/** One browser's view of the app: its own cookies, and what each call answered. */
+export type Browser = Awaited<ReturnType<Awaited<ReturnType<typeof startSift>>['browser']>>;
+
+/**
+ * Sift as a host puts it together, on a fresh store and home, reaching Google through `google` as it would Google itself,
+ * and given `model` as its model stand-in. Work a request begins (`kick`, the tick) waits in `queued` until `work()` does
+ * it, as a Workflow run would after the request answered. `browser()` is a browser with nobody signed in; `signIn` signs one
+ * in through Google's consent screen as a mailbox: a new person, or with `addTo`, another mailbox of whoever that browser is.
+ */
+export async function startSift(google: FakeGoogle, options: { model?: ChosenModel; keys?: Keyring; now?: () => number; env?: Record<string, string> } = {}) {
+  const config = loadConfig({ SIFT_HOME: tempDir(), ...options.env });
+  installClient(config, JSON.stringify({ web: { client_id: SECRETS.clientId, client_secret: SECRETS.clientSecret } }));
+  const store = await freshStore(options.keys);
+  const queued: Work[] = [];
+  const sift: Sift = await createSift({
+    config,
+    store,
+    ephemeral: memoryEphemeral(),
+    sessionSecret: 'secret',
+    allowedHosts: [],
+    signInAddresses: [],
+    forwarded: true,
+    log: () => {},
+    limitMs: 60_000,
+    begin: async (piece) => {
+      queued.push(piece);
+      return { begun: true };
+    },
+    ...(options.model ? { standIns: { model: options.model } } : {}),
+  });
+
+  const browser = () => {
+    const cookies = new Map<string, string>();
+    const call = async (method: 'GET' | 'POST', path: string, body?: unknown) => {
+      const response = await sift.respond(
+        new Request(`${SITE}${path}`, {
+          method,
+          headers: {
+            host: 'localhost:3000',
+            cookie: [...cookies].map(([name, value]) => `${name}=${value}`).join('; '),
+            ...(method === 'POST' ? { origin: SITE, 'content-type': 'application/json', 'x-sift': '1' } : {}),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          redirect: 'manual',
+        }),
+      );
+      for (const set of response.headers.getSetCookie()) {
+        const [pair] = set.split(';');
+        const name = pair!.slice(0, pair!.indexOf('='));
+        const value = pair!.slice(pair!.indexOf('=') + 1);
+        if (value === '' || /max-age=0/i.test(set)) cookies.delete(name);
+        else cookies.set(name, value);
+      }
+      if (response.status === 200 && path.startsWith('/api/')) answeredRoutes.add(`${method} ${new URL(path, SITE).pathname}`);
+      const text = await response.text();
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        parsed = { text };
+      }
+      return { status: response.status, body: parsed, location: response.headers.get('location') };
+    };
+    /** Through Google's consent screen as `address`: `add` a mailbox to whoever is signed in, or `send` let it send. */
+    const signIn = async (address: string, how: { add?: boolean; send?: boolean } = {}) => {
+      const login = await call('GET', `/auth/login?${how.add ? 'add=1' : how.send ? `grant=send&mailbox=${encodeURIComponent(address)}` : ''}`);
+      const state = new URL(login.location ?? '').searchParams.get('state');
+      if (!state) throw new Error(`/auth/login did not go to Google: ${login.status} ${login.location}`);
+      const back = await call('GET', `/auth/callback?state=${state}&code=${encodeURIComponent(google.consent(address, { send: how.send ?? false }))}`);
+      if (back.location?.includes('signin=')) throw new Error(`Signing in as ${address} failed: ${back.location}`);
+      return back;
+    };
+    return { call, signIn };
+  };
+
+  const signedIn = async (address: string) => {
+    const b = browser();
+    await b.signIn(address);
+    return b;
+  };
+  const work = async () => {
+    while (queued.length > 0) await sift.work(queued.shift()!);
+  };
+  const db = async (address: string) => await store.user((await userOf(store.central, address))!.id);
+  return {
+    sift,
+    store,
+    config,
+    queued,
+    browser,
+    /** A browser signed in as a new person with this mailbox, the first of whom owns the install. */
+    signedIn,
+    /**
+     * `signedIn`, with a label of their own (Receipts, archived) put in their record, without which Sift reads nothing of
+     * their Gmail, and the work signing in began done.
+     */
+    settled: async (address: string) => {
+      const b = await signedIn(address);
+      await addLabels(await db(address), [{ name: 'Receipts', description: 'Receipts and order confirmations.', disposition: 'archive' }]);
+      await work();
+      return b;
+    },
+    /** The database of whoever has this mailbox: to seed what Sift would have recorded, such as the model's answer about a message. */
+    db,
+    /**
+     * The model's answer that a message a pass recorded is `labelId`, recorded as a pass with Sift off records it: a
+     * suggestion, waiting on the person. A pass here has no model of its own.
+     */
+    judged: async (address: string, messageId: string, labelId: string, disposition: Decision['disposition'] = 'archive') =>
+      await recordDecision(await db(address), address, messageId, {
+        stage: 'model',
+        disposition,
+        labelId,
+        subscription: 'preserve',
+        reason: 'The model read it as this label.',
+        confidence: 0.9,
+      }),
+    /** Do the work that was begun, and what it begins in turn, until none is left. */
+    work,
+    /** The next tick: begin what is due, and do it. */
+    tick: async () => {
+      await sift.tick();
+      await work();
+    },
+  };
 }

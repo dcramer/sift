@@ -10,13 +10,19 @@ import { recordLabels } from '../src/store/messages.ts';
 import { sealPart } from '../src/store/content.ts';
 import type { Sql } from '../src/store/sql.ts';
 import { mailBodies } from '../src/store/query.ts';
-import { openUserDb } from './fixtures.ts';
-import { ACCOUNT, FakeMailbox, facts } from './helpers.ts';
+import type { Mailbox } from '../src/actions/mailbox.ts';
+import { connectGmail, fakeGoogle, openUserDb } from './fixtures.ts';
+import type { FakeGmail } from './google.ts';
+import { ACCOUNT, facts } from './helpers.ts';
 import { plain } from '../src/plain.ts';
 import { applyFeedback } from '../src/learn/feedback.ts';
 
+const fake = fakeGoogle();
+
 let db: Sql;
-let mailbox: FakeMailbox;
+let mailbox: Mailbox;
+let gmail: FakeGmail;
+let mine: string;
 const scope = scopeFor([ACCOUNT], true);
 const deps = () => ({ db, mailbox, now: () => 1000 });
 const ada = { address: 'ada@example.org', domain: 'example.org', name: 'Ada Lovelace' };
@@ -42,9 +48,10 @@ beforeEach(async () => {
   await db
     .insert(mailBodies)
     .values({ accountId: ACCOUNT, messageId: 'reply', bodyText: sealPart(db, ACCOUNT, 'reply', 'text', 'Thursday   works.\nSee you')!, fetchedAt: 300 });
-  mailbox = new FakeMailbox();
-  mailbox.labels.set('reply', ['INBOX', 'UNREAD', 'L:mine']);
-  mailbox.labels.set('gone', []);
+  ({ mailbox, gmail } = connectGmail(fake.google));
+  mine = gmail.label('mine');
+  gmail.deliver({ id: 'reply', threadId: 'lunch', from: 'Ada Lovelace <ada@example.org>', subject: 'Re: Lunch?', labelIds: ['INBOX', 'UNREAD', mine] });
+  gmail.deliver({ id: 'gone', from: 'news@example.com', subject: 'Archived already', labelIds: [] });
 });
 
 const list = async (query: Parameters<typeof listThreads>[2] = { view: 'all' }) => plain(await listThreads(db, scope, query));
@@ -115,33 +122,33 @@ describe('the reader’s own press', () => {
   it('archives by taking the message out of the inbox alone, written down before Gmail is asked', async () => {
     const { outcome, labels } = await press(deps(), ACCOUNT, 'reply', 'archive');
     expect(outcome).toMatchObject({ status: 'done' });
-    expect(labels).toEqual(['UNREAD', 'L:mine']);
+    expect(labels).toEqual(['UNREAD', mine]);
     expect(await getAction(db, 1)).toMatchObject({
       type: 'archive',
       status: 'done',
       payload: { add: [], remove: ['INBOX'] },
-      originalLabels: ['INBOX', 'UNREAD', 'L:mine'],
+      originalLabels: ['INBOX', 'UNREAD', mine],
     });
     // Not Sift's change, so correcting what Sift said does not take it back.
     expect(await lastStandingChange(db, ACCOUNT, 'reply')).toBeNull();
     expect((await undo(deps(), 1)).status).toBe('done');
-    expect(mailbox.labels.get('reply')).toEqual(['UNREAD', 'L:mine', 'INBOX']);
+    expect(gmail.message('reply')!.labelIds).toEqual(['UNREAD', mine, 'INBOX']);
   });
 
   it('marks read and unread', async () => {
-    expect((await press(deps(), ACCOUNT, 'reply', 'read')).labels).toEqual(['INBOX', 'L:mine']);
-    expect((await press(deps(), ACCOUNT, 'reply', 'unread')).labels).toEqual(['INBOX', 'L:mine', 'UNREAD']);
+    expect((await press(deps(), ACCOUNT, 'reply', 'read')).labels).toEqual(['INBOX', mine]);
+    expect((await press(deps(), ACCOUNT, 'reply', 'unread')).labels).toEqual(['INBOX', mine, 'UNREAD']);
     expect((await getAction(db, 2))?.type).toBe('unread');
   });
 
   it('leaves mail that is no longer in the inbox, and says what Gmail holds of it', async () => {
     expect(await press(deps(), ACCOUNT, 'gone', 'archive')).toEqual({ outcome: { status: 'skipped', reason: 'message is not in the inbox' }, labels: [] });
     expect(await press(deps(), ACCOUNT, 'unknown', 'read')).toMatchObject({ outcome: { status: 'skipped' }, labels: null });
-    expect(mailbox.modifyCalls).toBe(0);
+    expect(gmail.asked('users.messages.modify')).toEqual([]);
   });
 
   it('records a change Gmail may not have taken as unknown, to be settled from the mailbox', async () => {
-    mailbox.failModify = 'before';
+    gmail.fail('users.messages.modify', 'network');
     expect((await press(deps(), ACCOUNT, 'reply', 'archive')).outcome).toMatchObject({ status: 'unknown' });
     expect(await getAction(db, 1)).toMatchObject({ type: 'archive', status: 'unknown' });
   });

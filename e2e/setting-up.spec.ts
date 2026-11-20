@@ -40,8 +40,8 @@ test.describe('Setting up with no labels', () => {
 
     await expect(page.getByRole('heading', { name: 'Older mail', level: 1 })).toBeVisible();
     await expect(current(page)).toHaveText('4Older mail');
-    await expect(page.getByText('$0.39')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Go through 300' })).toBeVisible();
+    await expect(page.getByText('$0.06')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Go through 21' })).toBeVisible();
     await page.getByRole('button', { name: 'New mail only' }).click();
 
     await expect(page.getByRole('heading', { name: 'For review', level: 1 })).toBeVisible();
@@ -58,7 +58,7 @@ test.describe('Setting up with no labels', () => {
     await page.goto('/');
     await suggestLabels(page, 'No more sales pitches');
     await page.getByRole('button', { name: 'Use this label' }).click();
-    await page.getByRole('button', { name: 'Go through 300' }).click();
+    await page.getByRole('button', { name: 'Go through 21' }).click();
     await expect(page.getByRole('heading', { name: 'For review', level: 1 })).toBeVisible();
     await page.goto('/?settings=1');
     await expect(settings(page).getByText('Going through your inbox')).toBeVisible();

@@ -38,5 +38,5 @@ Preconditions:
 ## Gotchas
 
 - Several buttons share the name `Make a rule…` (the proposal line, the panel, every row of a sender page), and an open panel hides the ones behind it. On a sender page, take refs from a fresh `ab snapshot -i`.
-- A rule that moves mail opens `Apply to your inbox` after `Add rule`, because `Apply to mail already there` is ticked by default; what it shows here is the stand-in, so press `Cancel`.
+- A rule that moves mail opens `Apply to your inbox` after `Add rule`, because `Apply to mail already there` is ticked by default; press `Cancel`, or it moves the mail it found in Gmail.
 - Any rule added re-decides everything waiting, so the seed's promo → Spam rule takes Deals off For review on the first one.

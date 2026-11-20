@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { GmailApi, RawMessage } from '../src/gmail/api.ts';
 import { memoryEphemeral } from '../src/ephemeral/ephemeral.ts';
 import { finishAction, insertPendingAction, setActionStatus } from '../src/store/actions.ts';
 import { recordSync } from '../src/store/accounts.ts';
@@ -12,8 +11,8 @@ import type { Store } from '../src/store/store.ts';
 import type { Highlighter } from '../src/triage/digest.ts';
 import { type RunOptions, type Work, dueWork, runOnce, runWork } from '../src/work/run.ts';
 import { syncAccount, syncWants } from '../src/work/sync.ts';
-import { onePerson, raw } from './fixtures.ts';
-import { ACCOUNT, FakeMailbox, UNSURE, facts, rawMessage } from './helpers.ts';
+import { connectGmail, fakeGoogle, onePerson, raw } from './fixtures.ts';
+import { ACCOUNT, UNSURE, facts } from './helpers.ts';
 
 const WORK = 'work@example.com';
 const HOUR = 3_600_000;
@@ -21,52 +20,21 @@ const HOUR = 3_600_000;
 const SEVEN = Date.UTC(2026, 10, 18, 7);
 const DIGEST: Work = { kind: 'digest', person: 1 };
 
+const fake = fakeGoogle();
+
 let store: Store;
 let db: Sql;
-let mailboxes: Map<string, FakeMailbox>;
-let inboxes: Map<string, RawMessage[]>;
 let clock: number;
 let logs: string[];
 let asked: number;
 let highlight: Highlighter;
 
-const build = (id: string, subject: string): RawMessage =>
-  rawMessage(id, { from: 'Builds <builds@ci.example.org>', subject, internalDate: clock, labelIds: ['INBOX', 'UNREAD'] });
-
-/** A Gmail for one mailbox: each history read hands its new mail over once. */
-function api(account: string): GmailApi {
-  let cursor = 1;
-  const inbox = () => inboxes.get(account) ?? [];
-  return {
-    getProfile: async () => ({ emailAddress: account, historyId: String(cursor) }),
-    listHistory: async () => ({
-      additions: inbox()
-        .splice(0)
-        .map((m) => ({ id: m.id, labelIds: m.labelIds })),
-      labelChanges: [],
-      historyId: String(++cursor),
-    }),
-    searchInbox: async () => ({ ids: [] }),
-    inboxSize: async () => 0,
-    searchMail: async () => ({ ids: [] }),
-    mailboxSize: async () => 0,
-    getMessage: async () => null,
-    getMetadata: async () => null,
-    getLabelIds: async (id) => mailboxes.get(account)!.labels.get(id) ?? null,
-    listLabels: async () => [],
-    getThread: async () => null,
-    listSendAs: async () => [account],
-    getContent: async () => null,
-  };
-}
+const boxOf = (account = ACCOUNT) => fake.google.mailbox(account);
+const labelsOf = (id: string, account = ACCOUNT) => boxOf(account).message(id)!.labelIds;
 
 const options = (): RunOptions => ({
   ephemeral: memoryEphemeral(),
-  connect: (_db, account) => {
-    const gmail = api(account.id);
-    const held = [...(inboxes.get(account.id) ?? [])];
-    return { api: { ...gmail, getMetadata: async (id) => held.find((m) => m.id === id) ?? null }, mailbox: mailboxes.get(account.id)! };
-  },
+  connect: (_db, account) => connectGmail(fake.google, account.id),
   model: async () => ({
     judge: async () => UNSURE,
     highlight: async (input) => {
@@ -81,31 +49,37 @@ const options = (): RunOptions => ({
 
 /** New mail from the build server arriving in `account`, and a pass over it. */
 async function arrive(account: string, ...mail: [id: string, subject: string][]) {
-  const raws = mail.map(([id, subject]) => build(id, subject));
-  for (const m of raws) mailboxes.get(account)!.labels.set(m.id, [...m.labelIds]);
-  inboxes.set(account, raws);
+  for (const [id, subject] of mail) boxOf(account).deliver({ id, from: 'Builds <builds@ci.example.org>', to: account, subject, at: clock });
   await runOnce(db, options());
 }
 
 const digestsDue = async () => (await dueWork(store, options())).filter((w) => w.kind === 'digest');
 
+/** The digests Sift put into a mailbox, oldest first. */
+const digests = (account = ACCOUNT) =>
+  boxOf(account)
+    .all()
+    .filter((m) => m.header('From') === `Sift <${account}>`)
+    .toReversed();
+
 /** The digests put into a mailbox, read as Gmail would show them. */
 function delivered(account = ACCOUNT): { subject: string; text: string }[] {
   const decode = (b64: string) => new TextDecoder().decode(Uint8Array.from(atob(b64.replace(/\r\n/g, '')), (c) => c.charCodeAt(0)));
-  return [...mailboxes.get(account)!.inserted.values()].map((raw) => ({
-    subject: decode(/Subject: =\?UTF-8\?B\?([^?]+)\?=/.exec(raw)![1]!),
-    text: decode(raw.split('Content-Transfer-Encoding: base64\r\n\r\n')[1]!.split('\r\n--')[0]!),
+  return digests(account).map((m) => ({
+    subject: m.header('Subject'),
+    text: decode(m.raw.split('Content-Transfer-Encoding: base64\r\n\r\n')[1]!.split('\r\n--')[0]!),
   }));
 }
 
+/** Where the mailbox's history is now. */
+
 beforeEach(async () => {
   ({ store, db } = await onePerson(ACCOUNT, WORK));
-  mailboxes = new Map([
-    [ACCOUNT, new FakeMailbox()],
-    [WORK, new FakeMailbox()],
-  ]);
-  inboxes = new Map();
   clock = SEVEN - 4 * HOUR;
+  for (const account of [ACCOUNT, WORK]) {
+    boxOf(account).now = () => clock;
+    await recordSync(db, account, [], fake.google.mailbox(account).cursor(), clock - HOUR);
+  }
   logs = [];
   asked = 0;
   highlight = async () => ({ picks: [] });
@@ -119,8 +93,8 @@ describe('a daily digest', () => {
     await arrive(ACCOUNT, ['b1', 'Run 1 passed']);
     clock += HOUR;
     await arrive(WORK, ['w1', 'Run 2 failed']);
-    expect(mailboxes.get(ACCOUNT)!.labels.get('b1')).not.toContain('INBOX');
-    expect(mailboxes.get(WORK)!.labels.get('w1')).not.toContain('INBOX');
+    expect(labelsOf('b1')).not.toContain('INBOX');
+    expect(labelsOf('w1', WORK)).not.toContain('INBOX');
 
     clock = SEVEN + 6 * 60_000;
     expect(await digestsDue()).toEqual([DIGEST]);
@@ -131,9 +105,10 @@ describe('a daily digest', () => {
     expect(digest?.text).toContain('https://mail.google.com/mail/u/work%40example.com/#all/w1');
     expect(digest?.text).toContain('2 messages Sift archived since Tue, Nov 17, 7:00\u00a0AM');
     expect(delivered(WORK)).toEqual([]);
-    expect([...mailboxes.get(ACCOUNT)!.labels.get('inserted-1')!]).toEqual(['INBOX', 'UNREAD', 'L:sift/digest']);
+    const [put] = digests();
+    expect(put!.labelIds).toEqual(['INBOX', 'UNREAD', boxOf().labelId('sift/digest')]);
     expect(await raw(db).all('SELECT label_id, account_id, since, until, count, gmail_id FROM digests')).toEqual([
-      { label_id: 'notification', account_id: ACCOUNT, since: SEVEN - 24 * HOUR, until: SEVEN, count: 2, gmail_id: 'inserted-1' },
+      { label_id: 'notification', account_id: ACCOUNT, since: SEVEN - 24 * HOUR, until: SEVEN, count: 2, gmail_id: put!.id },
     ]);
     expect(await raw(db).all("SELECT account_id, message_id, status FROM actions WHERE type = 'digest'")).toEqual([
       { account_id: ACCOUNT, message_id: null, status: 'done' },
@@ -248,17 +223,15 @@ describe('a daily digest', () => {
   it('puts each digest in once, however often its step is run', async () => {
     await arrive(ACCOUNT, ['b1', 'Run 1 passed']);
     clock = SEVEN + 5 * 60_000;
-    const box = mailboxes.get(ACCOUNT)!;
 
     // Gmail took it, but its answer was lost: the next run finds it rather than putting it in again.
-    box.failInsert = 'after';
+    boxOf().fail('users.messages.insert', 'lost');
     await runWork(store, DIGEST, options(), clock + 60_000);
     expect(logs.at(-1)).toMatch(/Daily digests failed, will retry/);
     expect(await digestsDue()).toEqual([DIGEST]);
-    box.failInsert = null;
     await runWork(store, DIGEST, options(), clock + 60_000);
-    expect(box.inserted.size).toBe(1);
-    expect(await raw(db).all('SELECT gmail_id FROM digests')).toEqual([{ gmail_id: 'inserted-1' }]);
+    expect(digests()).toHaveLength(1);
+    expect(await raw(db).all('SELECT gmail_id FROM digests')).toEqual([{ gmail_id: digests()[0]!.id }]);
     expect(await raw(db).all("SELECT status FROM actions WHERE type = 'digest' ORDER BY id")).toEqual([{ status: 'done' }]);
     expect(asked).toBe(1);
     expect(await digestsDue()).toEqual([]);
@@ -266,11 +239,10 @@ describe('a daily digest', () => {
     // Gmail never took it: the next run puts it in, as it was written.
     await arrive(ACCOUNT, ['b2', 'Run 2 passed']);
     clock += 24 * HOUR;
-    box.failInsert = 'before';
+    boxOf().fail('users.messages.insert', 'network');
     await runWork(store, DIGEST, options(), clock + 60_000);
-    box.failInsert = null;
     await runWork(store, DIGEST, options(), clock + 60_000);
-    expect(box.inserted.size).toBe(2);
+    expect(digests()).toHaveLength(2);
     expect(await raw(db).all("SELECT status FROM actions WHERE type = 'digest' ORDER BY id")).toEqual([
       { status: 'done' },
       { status: 'failed' },
@@ -282,10 +254,8 @@ describe('a daily digest', () => {
   it('keeps track of a digest Gmail took, even once its mail has all been answered', async () => {
     await arrive(ACCOUNT, ['b1', 'Run 1 passed']);
     clock = SEVEN + 5 * 60_000;
-    const box = mailboxes.get(ACCOUNT)!;
-    box.failInsert = 'after';
+    boxOf().fail('users.messages.insert', 'lost');
     await runWork(store, DIGEST, options(), clock + 60_000);
-    box.failInsert = null;
     await recordDecision(
       db,
       ACCOUNT,
@@ -295,8 +265,8 @@ describe('a daily digest', () => {
     );
 
     await runWork(store, DIGEST, options(), clock + 60_000);
-    expect(box.inserted.size).toBe(1);
-    expect(await raw(db).all('SELECT gmail_id FROM digests')).toEqual([{ gmail_id: 'inserted-1' }]);
+    expect(digests()).toHaveLength(1);
+    expect(await raw(db).all('SELECT gmail_id FROM digests')).toEqual([{ gmail_id: digests()[0]!.id }]);
     expect(await raw(db).all("SELECT status FROM actions WHERE type = 'digest'")).toEqual([{ status: 'done' }]);
     expect(await digestsDue()).toEqual([]);
   });
@@ -335,35 +305,24 @@ describe('a daily digest', () => {
   it('is never taken for mail when it arrives', async () => {
     await arrive(ACCOUNT, ['b1', 'Run 1 passed']);
     clock = SEVEN + 5 * 60_000;
+    const { api } = connectGmail(fake.google);
+    const before = fake.google.mailbox(ACCOUNT).cursor();
     await runWork(store, DIGEST, options(), clock + 60_000);
-    const box = mailboxes.get(ACCOUNT)!;
-    const [[id, text]] = [...box.inserted] as [[string, string]];
-    const asGmail = rawMessage(id, {
-      labelIds: ['INBOX', 'UNREAD'],
-      headers: [
-        { name: 'From', value: `Sift <${ACCOUNT}>` },
-        { name: 'To', value: ACCOUNT },
-        { name: 'Subject', value: 'Notifications digest for Wed, Nov 18: 1 message' },
-        { name: 'Message-ID', value: /Message-ID: (\S+)/.exec(text)![1]! },
-      ],
-    });
-    const account = { id: ACCOUNT, number: 1, email: ACCOUNT, historyId: '1' };
-    const gmail = (ids: string[], read: string[] = []): GmailApi => ({
-      ...api(ACCOUNT),
-      listHistory: async () => ({
-        additions: ids.map((i) => ({ id: i, labelIds: ['INBOX'] })),
-        labelChanges: read.map((i) => ({ messageId: i, added: [], removed: ['UNREAD'] })),
-        historyId: '9',
-      }),
-      getMetadata: async (i) => (i === id ? asGmail : null),
-    });
+    const { id } = digests()[0]!;
+    /** The mailbox, with its history read from `cursor`. */
+    const from = (cursor: string) => ({ id: ACCOUNT, number: 1, email: ACCOUNT, historyId: cursor });
     // By Gmail's id, without reading it, arriving or read; and by its Message-ID before Sift has that.
-    expect(await syncWants(db, gmail([id]), account)).toBe(false);
-    expect(await syncWants(db, gmail([], [id]), account)).toBe(false);
-    expect(await syncWants(db, gmail([], ['b1']), account)).toBe(true);
-    expect(await syncAccount(db, gmail([id]), account, () => clock)).toMatchObject({ added: [], skipped: 0 });
+    expect(await syncWants(db, api, from(before))).toBe(false);
+    expect(await syncAccount(db, api, from(before), () => clock)).toMatchObject({ added: [], skipped: 0 });
+    let cursor = fake.google.mailbox(ACCOUNT).cursor();
+    boxOf().change(id, { remove: ['UNREAD'] });
+    expect(await syncWants(db, api, from(cursor))).toBe(false);
+    cursor = fake.google.mailbox(ACCOUNT).cursor();
+    boxOf().change('b1', { remove: ['UNREAD'] });
+    expect(await syncWants(db, api, from(cursor))).toBe(true);
+    expect(boxOf().asked('users.messages.get', id)).toEqual([]);
     await raw(db).run('UPDATE digests SET gmail_id = NULL');
-    expect(await syncAccount(db, gmail([id]), account, () => clock)).toMatchObject({ added: [], skipped: 1 });
+    expect(await syncAccount(db, api, from(before), () => clock)).toMatchObject({ added: [], skipped: 1 });
     expect(await raw(db).get('SELECT count(*) AS n FROM messages WHERE id = ?', id)).toEqual({ n: 0 });
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { messageDetail } from '../src/dashboard/queries/messages.ts';
 import { recordSync } from '../src/store/accounts.ts';
-import { openUserDb, raw } from './fixtures.ts';
+import { connectGmail, fakeGoogle, openUserDb, raw } from './fixtures.ts';
 import { storedFacts } from '../src/store/messages.ts';
 import { gatherEvidence } from '../src/work/evidence.ts';
 import { FACT_FILTERS as FACT_FILTER_CONDITIONS } from '../src/dashboard/types.ts';
@@ -10,6 +10,7 @@ import { sealFacts } from '../src/store/content.ts';
 import { FACTS, FACT_FILTER_WORDS } from '../web/src/lib/format.ts';
 import { ACCOUNT, everything, facts } from './helpers.ts';
 
+const fake = fakeGoogle();
 const me = { address: ACCOUNT, domain: 'example.org' };
 
 const campaign = facts({
@@ -209,52 +210,42 @@ describe('thread context', () => {
     expect(threadFacts(thread, 'elsewhere')).toBeNull();
   });
 
-  const setup = async (headers: Record<string, string>) => {
+  /** A person whose record holds the reply, in thread `threadId`; Gmail holds `thread` as t9, oldest first. */
+  const setup = async (headers: Record<string, string>, threadId = 't9') => {
     const db = await openUserDb(ACCOUNT);
-    const message = facts({ messageId: 'reply', threadId: 't9', headers });
+    const message = facts({ messageId: 'reply', threadId, headers });
     await recordSync(db, ACCOUNT, [message], '2');
-    const asked: string[] = [];
-    const sources = (getThread: (id: string) => Promise<typeof thread | null>) => ({
-      db,
-      api: { getContent: async () => null, getThread: async (id: string) => (asked.push(id), getThread(id)) },
-      mailbox: { hasSentTo: async () => false },
-    });
-    return { db, message, asked, sources };
+    const { api, mailbox, gmail } = connectGmail(fake.google);
+    if (!gmail.message('first'))
+      thread.forEach(({ id, labelIds }, i) =>
+        gmail.deliver({ id, threadId: 't9', from: labelIds.includes('SENT') ? ACCOUNT : 'ada@example.com', labelIds, at: Date.UTC(2026, 10, 1) + i }),
+      );
+    const threadsAsked = () => gmail.asked('users.threads.get').map((r) => r.id);
+    return { db, message, gmail, threadsAsked, sources: { db, api, mailbox } };
   };
 
   it("reads a reply's thread for the model, records it, and reads nothing for mail that is not a reply", async () => {
     const reply = await setup({ 'in-reply-to': '<mine@example.org>' });
-    const evidence = await gatherEvidence(
-      reply.sources(async () => thread),
-      reply.message,
-    );
-    expect(reply.asked).toEqual(['t9']);
+    const evidence = await gatherEvidence(reply.sources, reply.message);
+    expect(reply.threadsAsked()).toEqual(['t9']);
     expect(evidence.known).toMatchObject({ earlierInThread: 2, ownerInThread: true });
     expect(await storedFacts(reply.db, ACCOUNT, 'reply')).toMatchObject({ earlierInThread: 2, ownerInThread: true });
     expect(describeFacts(evidence.known)).toEqual(expect.arrayContaining(['Earlier messages in its thread: 2', 'Owner has written in its thread: yes']));
 
     const fresh = await setup({});
-    const alone = await gatherEvidence(
-      fresh.sources(async () => thread),
-      fresh.message,
-    );
-    expect(fresh.asked).toEqual([]);
+    const alone = await gatherEvidence(fresh.sources, fresh.message);
+    expect(fresh.threadsAsked()).toEqual(['t9']);
     expect(alone.known).not.toHaveProperty('ownerInThread');
   });
 
   it('leaves the thread unknown when it cannot be read', async () => {
     const reply = await setup({ references: '<mine@example.org>' });
-    const failed = await gatherEvidence(
-      reply.sources(async () => {
-        throw new Error('network');
-      }),
-      reply.message,
-    );
+    reply.gmail.fail('users.threads.get', { status: 403, reason: 'userRateLimitExceeded' });
+    const failed = await gatherEvidence(reply.sources, reply.message);
     expect(failed.known).not.toHaveProperty('ownerInThread');
-    const gone = await gatherEvidence(
-      reply.sources(async () => null),
-      reply.message,
-    );
-    expect(gone.known).not.toHaveProperty('earlierInThread');
+
+    const gone = await setup({ references: '<mine@example.org>' }, 't-gone');
+    expect((await gatherEvidence(gone.sources, gone.message)).known).not.toHaveProperty('earlierInThread');
+    expect(gone.threadsAsked()).toEqual(['t9', 't-gone']);
   });
 });

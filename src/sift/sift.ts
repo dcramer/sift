@@ -8,9 +8,6 @@ import { listAccounts, personOf } from '../store/accounts.ts';
 import { people } from '../store/people.ts';
 import type { Sql } from '../store/sql.ts';
 import type { Store } from '../store/store.ts';
-import type { Mailbox } from '../actions/mailbox.ts';
-import type { Controls } from '../dashboard/controls.ts';
-import type { GmailApi } from '../gmail/api.ts';
 import type { ChosenModel } from '../model/models.ts';
 import { buildControls, gmailFor, openModelTier } from './controls.ts';
 import { buildSignIn } from './google-sign-in.ts';
@@ -20,14 +17,12 @@ import { logged, reportError } from '../telemetry.ts';
 export type Beginning = { begun: true } | { begun: false; since?: number };
 
 /**
- * What a test host puts in place of what Sift reaches outside this machine for (verify-sift's `stand-ins.ts`):
- * each mailbox's Gmail, the model that suggests labels and drafts rules, and what Gmail would count in an inbox
- * that the stand-in does not hold. A pass is given no model, so the record a test starts from is not judged again.
+ * What a test host puts in place of the model that suggests labels and drafts rules (verify-sift's `stand-ins.ts`). A pass
+ * is given no model, so the record a test starts from is not judged again. Gmail has no stand-in here: a test answers
+ * Google's own addresses (`tests/google.ts`), so Sift's Gmail client runs as it does against Google.
  */
 export interface StandIns {
-  gmail: (email: string) => { api: GmailApi; mailbox: Mailbox };
   model: ChosenModel;
-  inbox: Pick<Controls, 'inboxEstimate' | 'mailReach' | 'ruleInbox'>;
 }
 
 /** What a host gives sift: `sift run` on a machine, or a function on Vercel (docs/runtime.md). */
@@ -132,7 +127,7 @@ export async function createSift(host: Host): Promise<Sift> {
           },
         }),
     unsubscribe: (db, accountId, messageId) => unsubscribe({ db }, accountId, messageId),
-    connect: async (db, account) => standIns?.gmail(account.email) ?? (await gmailFor(config, ephemeral, db, account.email)),
+    connect: async (db, account) => await gmailFor(config, ephemeral, db, account.email),
   };
   const { begin } = host;
   const tick = async (who?: readonly number[]) => {
@@ -158,7 +153,7 @@ export async function createSift(host: Host): Promise<Sift> {
   const dashboard = createDashboard(people(store), {
     allowedHosts: host.allowedHosts,
     forwarded: host.forwarded,
-    controls: { ...controls, ...standIns?.inbox },
+    controls,
     signIn: buildSignIn(config, store, { ephemeral, kick: (person) => tick([person]) }),
     sessionSecret: host.sessionSecret,
     signInAddresses: host.signInAddresses,

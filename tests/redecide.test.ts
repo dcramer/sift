@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyFeedback, pendingSuggestions } from '../src/learn/feedback.ts';
 import { redecideWaiting } from '../src/learn/redecide.ts';
 import { recordSync } from '../src/store/accounts.ts';
-import { firstAccount, openUserDb, raw, withReason } from './fixtures.ts';
+import { connectGmail, fakeGoogle, firstAccount, openUserDb, raw, withReason } from './fixtures.ts';
 import { undo } from '../src/actions/executor.ts';
 import { triageAccount } from '../src/work/triage.ts';
 import { startRun } from '../src/store/runs.ts';
@@ -13,7 +13,9 @@ import { addRule, listRules, removeRule } from '../src/store/rules.ts';
 import { rememberCorrespondent } from '../src/store/senders.ts';
 import type * as Senders from '../src/store/senders.ts';
 import type { Decision } from '../src/triage/types.ts';
-import { ACCOUNT, FakeMailbox, facts } from './helpers.ts';
+import { ACCOUNT, facts } from './helpers.ts';
+
+const fake = fakeGoogle();
 
 /** Run once, on the handle redecide is using, the next time it reads whether the user writes to a sender. */
 let meanwhile: ((db: Sql) => Promise<void>) | null = null;
@@ -185,11 +187,12 @@ describe('when a rule changes', () => {
     expect(await waiting()).toEqual([sale, underLearned].toSorted());
   });
   it("mail Sift marked for review while on is settled by a rule of the user's that decides it, and its mark taken back", async () => {
-    const mailbox = new FakeMailbox();
+    const { mailbox, gmail } = connectGmail(fake.google);
+    const labelsOf = (id: string) => gmail.message(id)!.labelIds;
     const asked = async (address: string) => {
       const id = await decided(address);
       await raw(db).run('UPDATE decisions SET carry_out = true WHERE message_id = ?', id);
-      mailbox.labels.set(id, ['INBOX']);
+      gmail.deliver({ id, from: address, labelIds: ['INBOX'] });
       return id;
     };
     const sale = await asked('sales@example.com');
@@ -197,7 +200,7 @@ describe('when a rule changes', () => {
     const ops = await asked('ops@example.com');
     const account = await firstAccount(db);
     await triageAccount({ db, mailbox }, account);
-    expect(mailbox.labels.get(sale)).toEqual(['INBOX', 'L:sift/review']);
+    expect(labelsOf(sale)).toEqual(['INBOX', gmail.labelId('sift/review')]);
 
     await addRule(db, { match: { from: ['sales@example.com'] }, disposition: 'archive' }, 'user');
     // Not the user's, and one a model must check: neither takes mail from them.
@@ -210,8 +213,8 @@ describe('when a rule changes', () => {
 
     for (const mark of marks) await undo({ db, mailbox }, mark);
     await triageAccount({ db, mailbox }, account);
-    expect(mailbox.labels.get(sale)).toEqual(['L:sift/did/archived']);
-    expect(mailbox.labels.get(news)).toEqual(['INBOX', 'L:sift/review']);
+    expect(labelsOf(sale)).toEqual([gmail.labelId('sift/did/archived')]);
+    expect(labelsOf(news)).toEqual(['INBOX', gmail.labelId('sift/review')]);
   });
 
   it('removing a rule sift learned brings back what it decided, even mail it was the first to decide', async () => {

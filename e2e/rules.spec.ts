@@ -1,5 +1,21 @@
 import { addRule, fact, openRule, removeQuestion, removeRule, ruleDialog, ruleId, rulePanel, ruleRows, writeRule } from './rule.ts';
-import { back, expect, forReviewLink, reader, readerHeading, param, path, pointAt, query, row, test, throughChatGPT, toast, tooltip } from './sift.ts';
+import {
+  back,
+  expect,
+  forReviewLink,
+  reader,
+  readerHeading,
+  param,
+  path,
+  pointAt,
+  query,
+  row,
+  settingsActive,
+  test,
+  throughChatGPT,
+  toast,
+  tooltip,
+} from './sift.ts';
 
 test.describe('Rules', () => {
   test('a rule written by hand opens on its panel, and takes the mail it covers off For review', async ({ page }) => {
@@ -285,7 +301,11 @@ test.describe('Rules', () => {
       await expect(apply).toHaveCount(0);
 
       const opened = rulePanel(page, 'sale@store.example.com');
-      await expect(opened.getByText('Finding them in Gmail · 0 so far')).toBeVisible();
+      // Gmail answered the first page of 500, and is still listing the rest.
+      await expect(async () => {
+        await page.reload();
+        await expect(opened.getByText('Finding them in Gmail · 500 so far')).toBeVisible({ timeout: 1000 });
+      }).toPass();
       await opened.getByRole('button', { name: 'Stop' }).click();
       await expect(opened.getByText('Finding them in Gmail', { exact: false })).toHaveCount(0);
       await expect(opened.getByRole('button', { name: 'Apply to inbox…' })).toBeVisible();
@@ -390,22 +410,30 @@ test.describe('Rules', () => {
 });
 
 test.describe('Apply to your inbox, with what is due begun', () => {
-  test('the press begins the rule’s run as a Workflow run, which finishes when the search finds nothing', async ({ page }) => {
+  test('the press begins the rule’s run as a Workflow run, which finishes once it has gone through what the search found, and the next pass moves it', async ({
+    page,
+    sift,
+  }) => {
     await page.goto('/rules');
     const dialog = await writeRule(page);
     await dialog.getByRole('textbox', { name: 'Value 1' }).fill('sale@store.example.com');
     await dialog.getByRole('button', { name: 'Add rule', exact: true }).click();
     const apply = page.getByRole('dialog', { name: 'Apply to your inbox' });
-    await apply.getByRole('button', { name: 'Archive all' }).click();
+    await expect(apply.getByRole('cell', { name: 'Winter sale starts now' })).toBeVisible();
+    await apply.getByRole('button', { name: 'Archive 1' }).click();
     await expect(apply).toHaveCount(0);
 
     const opened = rulePanel(page, 'sale@store.example.com');
     await expect(async () => {
       await page.reload();
-      // Its mail still waiting, read with how far applying it has got.
-      await expect(opened.getByRole('cell', { name: 'Winter sale starts now' })).toBeVisible({ timeout: 1000 });
+      // Decided, to be carried out at the next pass, so no longer listed as waiting.
       await expect(opened.getByRole('button', { name: 'Apply to inbox…' })).toBeVisible({ timeout: 1000 });
+      await expect(opened.getByRole('cell', { name: 'Winter sale starts now' })).toHaveCount(0, { timeout: 1000 });
     }).toPass();
     await expect(opened.getByText('Finding them in Gmail', { exact: false })).toHaveCount(0);
+
+    await page.goto('/?settings=1');
+    await settingsActive(page).getByRole('button', { name: 'Check now' }).click();
+    await expect.poll(() => sift.google().mailbox('me@example.org').message('m8')?.labelIds).not.toContain('INBOX');
   });
 });

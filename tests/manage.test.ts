@@ -9,7 +9,6 @@ import { memoryEphemeral } from '../src/ephemeral/ephemeral.ts';
 import { triageAccount } from '../src/work/triage.ts';
 import type { Controls, SignIn } from '../src/dashboard/controls.ts';
 import { people } from '../src/store/people.ts';
-import type { RawMessage } from '../src/gmail/api.ts';
 import { continueEval, startEval } from '../src/learn/evals.ts';
 import { redecideWaiting } from '../src/learn/redecide.ts';
 import { connectAccount, recordSync } from '../src/store/accounts.ts';
@@ -19,11 +18,12 @@ import { recordDecision, settleDecision } from '../src/store/decisions.ts';
 import { EXAMPLE_KEEP_DAYS } from '../src/store/examples.ts';
 import { preferences, setActive, setMail } from '../src/store/preferences.ts';
 import { addRule, listRules } from '../src/store/rules.ts';
-import { ACCOUNT, DAY, FakeMailbox, UNSURE, facts, quietSources, rawMessage, storeExample, testModel, workDue } from './helpers.ts';
-import { type Reply, firstAccount, modelRun, raw, startDashboard, onePerson, withReason } from './fixtures.ts';
+import { ACCOUNT, DAY, UNSURE, facts, storeExample, testModel, workDue } from './helpers.ts';
+import { type Reply, connectGmail, fakeGoogle, firstAccount, modelRun, raw, startDashboard, onePerson, withReason } from './fixtures.ts';
 import type { Store } from '../src/store/store.ts';
 import { seal } from '../src/plain.ts';
 
+const fake = fakeGoogle();
 let db: Sql;
 let store: Store;
 let calls: string[];
@@ -1027,41 +1027,31 @@ describe('signing in with Google', () => {
 
 describe('going through the inbox', () => {
   const unsure = async () => UNSURE;
-  let mailbox: FakeMailbox;
+  let gmail: ReturnType<typeof connectGmail>;
   let asked: string[];
-  let listed: string[];
-  let gmail: Record<string, RawMessage>;
   beforeEach(() => {
-    mailbox = new FakeMailbox();
+    gmail = connectGmail(fake.google);
     asked = [];
-    listed = [];
-    gmail = {};
   });
-  /** Gmail holding `ids` in the inbox, listed two to a page. */
-  const inGmail = (...messages: RawMessage[]) => {
-    for (const m of messages) {
-      gmail[m.id] = m;
-      mailbox.labels.set(m.id, [...m.labelIds]);
-    }
-  };
-  const api = {
-    searchInbox: async (_query: string, pageToken?: string) => {
-      const ids = Object.keys(gmail);
-      const from = Number(pageToken ?? 0);
-      listed.push(pageToken ?? '');
-      return { ids: ids.slice(from, from + 2), ...(from + 2 < ids.length ? { nextPageToken: String(from + 2) } : {}) };
-    },
-    getMetadata: async (id: string) => gmail[id] ?? null,
-  };
+  /** Mail from news@example.com that was in the inbox before Sift, newest first. */
+  const inGmail = (...ids: string[]) =>
+    ids.forEach((id, i) => gmail.gmail.deliver({ id, from: 'News <news@example.com>', to: ACCOUNT, at: Date.UTC(2026, 0, 1) - i }, { quietly: true }));
+  /** The page of the inbox each search asked Gmail for. */
+  const listed = () =>
+    gmail.gmail
+      .asked('users.messages.list')
+      .filter((r) => !r.q)
+      .map((r) => r.pageToken ?? '');
+  const labelsOf = (id: string) => gmail.gmail.message(id)!.labelIds;
   /** One piece of work on the run, with Sift on or off; the model is `judge`. */
   const goOn = async (run: number, options: { on?: boolean; judge?: typeof unsure; until?: number; now?: () => number } = {}) =>
     await continueInboxRun(
       {
         db,
-        api,
-        mailbox: options.on ? mailbox : null,
-        answers: mailbox,
-        sources: quietSources(mailbox),
+        api: gmail.api,
+        mailbox: options.on ? gmail.mailbox : null,
+        answers: gmail.mailbox,
+        sources: gmail,
         model: testModel(async (input) => (asked.push(input.evidence.facts.messageId), await (options.judge ?? unsure)())),
         ...(options.until === undefined ? {} : { until: options.until }),
         now: options.now ?? (() => 100),
@@ -1075,11 +1065,11 @@ describe('going through the inbox', () => {
   };
 
   it('lists the inbox and decides what Sift never saw, without moving the sync cursor', async () => {
-    inGmail(rawMessage('a'), rawMessage('b'), rawMessage('c'));
-    gmail['gone'] = rawMessage('gone', { labelIds: ['SENT'] });
+    inGmail('a', 'b', 'c', 'gone');
+    gmail.gmail.meanwhile('users.messages.list', () => gmail.gmail.change('gone', { remove: ['INBOX'] }));
     const run = await begin(false);
     expect(await goOn(run)).toMatchObject({ from: 0, to: 4, of: 4 });
-    expect(listed).toEqual(['', '2']);
+    expect(listed()).toEqual(['']);
     expect(asked.toSorted()).toEqual(['a', 'b', 'c']);
     expect((await firstAccount(db)).historyId).toBe('1');
     // Recorded to suggest about only, so a pass that came to them first would not act either.
@@ -1091,16 +1081,24 @@ describe('going through the inbox', () => {
     expect(await raw(db).all('SELECT finished_at FROM inbox_runs')).toEqual([{ finished_at: 100 }]);
   });
 
+  it('lists an inbox longer than a page of Gmail’s search a page at a time, before deciding any of it', async () => {
+    inGmail(...Array.from({ length: 501 }, (_, i) => `m${i}`));
+    const run = await begin(false, { most: 1000 });
+    let clock = 0;
+    expect(await goOn(run, { until: 1, now: () => clock, judge: async () => ((clock = 1), await unsure()) })).toMatchObject({ from: 0, to: 4, of: 501 });
+    expect(listed()).toEqual(['', '500']);
+  });
+
   it('goes no further than its most, newest first', async () => {
-    inGmail(rawMessage('a'), rawMessage('b'), rawMessage('c'));
+    inGmail(...Array.from({ length: 501 }, (_, i) => `m${i}`));
     const run = await begin(false, { most: 2 });
     expect(await goOn(run)).toMatchObject({ to: 2, of: 2 });
-    expect(listed).toEqual(['']);
-    expect(asked.toSorted()).toEqual(['a', 'b']);
+    expect(listed()).toEqual(['']);
+    expect(asked.toSorted()).toEqual(['m0', 'm1']);
   });
 
   it('decides again what waits on the user, but not what they answered or what was decided since it began', async () => {
-    inGmail(rawMessage('waiting'), rawMessage('answered'), rawMessage('since'));
+    inGmail('waiting', 'answered', 'since');
     await recordSync(
       db,
       ACCOUNT,
@@ -1118,10 +1116,10 @@ describe('going through the inbox', () => {
 
   it('carries out what it decides only when Sift was on at the press and still is', async () => {
     await addRule(db, { match: { from: ['news@example.com'] }, labelId: 'newsletter' }, 'user');
-    inGmail(rawMessage('a'), rawMessage('b'), rawMessage('c'));
+    inGmail('a', 'b', 'c');
     // Off at the press: a suggestion, even with Sift turned on since.
     await goOn(await begin(false), { on: true });
-    expect(mailbox.modifyCalls).toBe(0);
+    expect(gmail.gmail.asked('users.messages.modify')).toEqual([]);
     // On at the press, and still on.
     await goOn(await begin(true, { at: 150 }), { on: true, now: () => 200 });
     expect(await raw(db).all('SELECT message_id, carry_out, outcome FROM decisions WHERE decided_at = 200 ORDER BY message_id')).toEqual([
@@ -1129,30 +1127,30 @@ describe('going through the inbox', () => {
       { message_id: 'b', carry_out: true, outcome: 'done' },
       { message_id: 'c', carry_out: true, outcome: 'done' },
     ]);
-    expect(mailbox.labels.get('a')).not.toContain('INBOX');
+    expect(labelsOf('a')).not.toContain('INBOX');
   });
 
   it('takes back what Sift did before carrying out something different', async () => {
-    inGmail(rawMessage('a', { labelIds: ['INBOX'] }));
+    gmail.gmail.deliver({ id: 'a', from: 'News <news@example.com>', to: ACCOUNT, labelIds: ['INBOX'] }, { quietly: true });
     await setActive(db, true);
     await recordSync(db, ACCOUNT, [facts({ messageId: 'a' })], '2');
     // Sift could not place it, and marked it for the user in Gmail.
-    await triageAccount({ db, mailbox, model: testModel(), sources: quietSources(mailbox), now: () => 10 }, await firstAccount(db));
-    const marked = mailbox.labels.get('a')!;
+    await triageAccount({ db, mailbox: gmail.mailbox, model: testModel(), sources: gmail, now: () => 10 }, await firstAccount(db));
+    const marked = labelsOf('a');
     expect(marked.length).toBeGreaterThan(1);
     // Now a rule says what it is.
     await addRule(db, { match: { from: ['news@example.com'] }, labelId: 'newsletter' }, 'user');
     await goOn(await begin(true), { on: true, now: () => 200 });
-    const now = mailbox.labels.get('a')!;
+    const now = labelsOf('a');
     expect(now).not.toContain('INBOX');
     expect(now.filter((l) => marked.includes(l))).toEqual([]);
   });
 
   it('stops at its time limit, and carries on from there', async () => {
-    inGmail(rawMessage('a'), rawMessage('b'), rawMessage('c'), rawMessage('d'), rawMessage('e'));
+    inGmail('a', 'b', 'c', 'd', 'e');
     const run = await begin(false);
     expect(await goOn(run, { until: 0, now: () => 0 })).toMatchObject({ to: 0, of: 0 });
-    expect(listed).toEqual([]);
+    expect(listed()).toEqual([]);
     // Four at a time, each model call taking 10.
     let clock = 0;
     const slow = async () => ((clock += 10), await unsure());
@@ -1163,7 +1161,7 @@ describe('going through the inbox', () => {
   });
 
   it('leaves what the model was not asked about for the next piece, in order', async () => {
-    inGmail(...Array.from({ length: 13 }, (_, i) => rawMessage(`m${i}`)));
+    inGmail(...Array.from({ length: 13 }, (_, i) => `m${i}`));
     const run = await begin(false, { most: 20 });
     const down = async (): Promise<Awaited<ReturnType<typeof unsure>>> => {
       throw new Error('provider down');
@@ -1177,7 +1175,7 @@ describe('going through the inbox', () => {
   });
 
   it('stops when the person stops it, keeping what it decided', async () => {
-    inGmail(rawMessage('a'), rawMessage('b'), rawMessage('c'), rawMessage('d'), rawMessage('e'));
+    inGmail('a', 'b', 'c', 'd', 'e');
     const run = await begin(false);
     await goOn(run, { judge: async () => (await stopInboxRuns(db, null, 70), await unsure()) });
     expect(asked).toHaveLength(4);
@@ -1190,7 +1188,7 @@ describe('going through the inbox', () => {
     const { call } = await startDashboard(people(store), { controls });
     const importing = async () => ((await call('GET', '/api/suggestions')).body as { importing: boolean }).importing;
     expect(await importing()).toBe(false);
-    inGmail(rawMessage('a'), rawMessage('b'), rawMessage('c'), rawMessage('d'), rawMessage('e'));
+    inGmail('a', 'b', 'c', 'd', 'e');
     const run = await begin(false);
     expect(await importing()).toBe(true);
     let clock = 100;

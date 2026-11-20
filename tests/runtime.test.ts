@@ -6,12 +6,14 @@ import { fromHere } from '../src/cli/network.ts';
 import { type Ephemeral, memoryEphemeral } from '../src/ephemeral/ephemeral.ts';
 import type { RunOptions } from '../src/work/run.ts';
 import { startInboxRuns } from '../src/store/inbox.ts';
-import { listAccounts } from '../src/store/accounts.ts';
+import { listAccounts, recordSync } from '../src/store/accounts.ts';
 import { people } from '../src/store/people.ts';
 import { setModel } from '../src/store/preferences.ts';
 import type { Store } from '../src/store/store.ts';
-import { googleSignIn, onePerson, startDashboard } from './fixtures.ts';
-import { ACCOUNT, FakeMailbox, codeSignIn, tempDir, testModel, workDue } from './helpers.ts';
+import { connectGmail, fakeGoogle, googleSignIn, onePerson, startDashboard } from './fixtures.ts';
+import { ACCOUNT, codeSignIn, tempDir, testModel, workDue } from './helpers.ts';
+
+const fake = fakeGoogle();
 
 /**
  * Module state that holds between calls, allowed because any instance computes the same: a cache, not a
@@ -61,35 +63,22 @@ describe('a flow whose steps reach different instances', () => {
   it('goes through an inbox one instance was asked to, on another', async () => {
     const { store, db } = await onePerson(ACCOUNT);
     const ephemeral = memoryEphemeral();
-    const searched: string[] = [];
+    await recordSync(db, ACCOUNT, [], fake.google.mailbox(ACCOUNT).cursor());
     // Each instance builds its own options; only the store and the ephemeral store are shared.
     const instance = (): RunOptions => ({
       ephemeral,
       log: () => {},
       model: async () => testModel(),
-      connect: () => ({
-        api: {
-          getProfile: async () => ({ emailAddress: ACCOUNT, historyId: '1' }),
-          listHistory: async () => ({ additions: [], historyId: '1' }),
-          searchInbox: async (query) => (searched.push(query), { ids: [] }),
-          inboxSize: async () => 0,
-          searchMail: async () => ({ ids: [] }),
-          mailboxSize: async () => 0,
-          getMessage: async () => null,
-          getMetadata: async () => null,
-          getLabelIds: async () => null,
-          listLabels: async () => [],
-          getContent: async () => null,
-          getThread: async () => null,
-          listSendAs: async () => [ACCOUNT],
-        },
-        mailbox: new FakeMailbox(),
-      }),
+      connect: () => connectGmail(fake.google),
     });
     await startInboxRuns(db, [ACCOUNT], { acts: false, most: 10, now: 0 });
     await workDue(store, instance(), Infinity);
     await workDue(store, instance(), Infinity);
-    expect(searched).toEqual(['']);
+    const inboxSearches = fake.google
+      .mailbox(ACCOUNT)
+      .asked('users.messages.list')
+      .filter((r) => r.labelIds?.includes('INBOX'));
+    expect(inboxSearches.map((r) => r.q)).toEqual(['']);
   });
 });
 

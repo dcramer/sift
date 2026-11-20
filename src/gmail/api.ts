@@ -54,7 +54,7 @@ export interface HistoryLabelChange {
   removed: string[];
 }
 
-export interface HistoryPage {
+interface HistoryPage {
   additions: HistoryAddition[];
   labelChanges?: HistoryLabelChange[];
   /**

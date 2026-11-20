@@ -35,8 +35,10 @@ import {
   tracedFetch,
 } from '../src/telemetry.ts';
 import { triageAccount } from '../src/work/triage.ts';
-import { firstAccount, freshStore, openUserDb, personWith, raw } from './fixtures.ts';
-import { ACCOUNT, facts, quietSources, SAMPLE_LABELS, storeExample } from './helpers.ts';
+import { connectGmail, fakeGoogle, firstAccount, freshStore, openUserDb, personWith, raw } from './fixtures.ts';
+import { ACCOUNT, facts, SAMPLE_LABELS, storeExample } from './helpers.ts';
+
+const fake = fakeGoogle();
 
 const SENDER = 'billing@shop.example.com';
 const SUBJECT = 'Your invoice 8812 is overdue';
@@ -142,7 +144,7 @@ describe('the model call, as Sentry is sent it', () => {
     await recordSync(db, ACCOUNT, [message], '2', 0);
     const { models, model } = answering();
     await triageAccount(
-      { db, mailbox: null, model: { judge: createJudge(models, model, 'low'), model: 'faux/model' }, sources: quietSources() },
+      { db, mailbox: null, model: { judge: createJudge(models, model, 'low'), model: 'faux/model' }, sources: connectGmail(fake.google) },
       await firstAccount(db),
     );
 

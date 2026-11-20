@@ -22,7 +22,7 @@ export async function serveSeed(root: string): Promise<{ url: string; cookie: st
   const dir = mkdtempSync(join(tmpdir(), 'sift-measure-'));
   const { stdout } = await promisify(execFile)(
     'node',
-    ['--disable-warning=ExperimentalWarning', join(SCRIPTS, 'seed.ts'), join(dir, 'home'), join(dir, 'gmail.json')],
+    ['--disable-warning=ExperimentalWarning', join(SCRIPTS, 'seed.ts'), join(dir, 'home'), join(dir, 'google.json')],
     {
       cwd: root,
     },
@@ -30,7 +30,7 @@ export async function serveSeed(root: string): Promise<{ url: string; cookie: st
   const port = await freePort();
   const child: ChildProcess = spawn(
     'node',
-    ['--disable-warning=ExperimentalWarning', join(SCRIPTS, 'serve.ts'), join(dir, 'home'), String(port), join(dir, 'gmail.json')],
+    ['--disable-warning=ExperimentalWarning', join(SCRIPTS, 'serve.ts'), join(dir, 'home'), String(port), join(dir, 'google.json')],
     { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, SIFT_CLOUD: 'false' } },
   );
   let log = '';

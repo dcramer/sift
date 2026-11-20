@@ -1,71 +1,45 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { GmailApi, HistoryLabelChange, RawMessage } from '../src/gmail/api.ts';
-import { MAX_BODY_CHARS, readContent } from '../src/gmail/body.ts';
+import { MAX_BODY_CHARS } from '../src/gmail/body.ts';
 import { memoryEphemeral } from '../src/ephemeral/ephemeral.ts';
+import { recordSync } from '../src/store/accounts.ts';
 import { openPart } from '../src/store/content.ts';
 import { setMail } from '../src/store/preferences.ts';
 import type { Sql } from '../src/store/sql.ts';
 import { type RunOptions, runOnce } from '../src/work/run.ts';
 import { syncAccount } from '../src/work/sync.ts';
-import { firstAccount, openUserDb, raw } from './fixtures.ts';
-import { ACCOUNT, FakeMailbox, b64, rawMessage, testModel } from './helpers.ts';
+import { connectGmail, fakeGoogle, firstAccount, openUserDb, raw } from './fixtures.ts';
+import { ACCOUNT, DAY, testModel } from './helpers.ts';
+
+const NOW = Date.UTC(2026, 10, 19, 12);
+const fake = fakeGoogle();
 
 let db: Sql;
-let inbox: RawMessage[];
-let history: HistoryLabelChange[];
-let cursor: number;
-/** Every full read of a message, by id. */
-let read: string[];
+let gmail: ReturnType<typeof connectGmail>;
 
-/** A Gmail whose history hands over `inbox` as new mail and `history` as label changes, once each. */
-const gmail = (): GmailApi => ({
-  getProfile: async () => ({ emailAddress: ACCOUNT, historyId: String(cursor) }),
-  listHistory: async () => ({
-    additions: inbox.splice(0).map((m) => ({ id: m.id, labelIds: m.labelIds })),
-    labelChanges: history.splice(0),
-    historyId: String(++cursor),
-  }),
-  searchInbox: async () => ({ ids: [] }),
-  inboxSize: async () => 0,
-  searchMail: async () => ({ ids: [] }),
-  mailboxSize: async () => 0,
-  getMessage: async (id) => {
-    read.push(id);
-    const raw = known.find((m) => m.id === id);
-    return raw ? { raw, content: readContent({ mimeType: 'text/plain', body: { data: b64(textOf(id)) } }) } : null;
-  },
-  getMetadata: async (id) => known.find((m) => m.id === id) ?? null,
-  getLabelIds: async () => null,
-  listLabels: async () => [],
-  getThread: async () => null,
-  listSendAs: async () => [ACCOUNT],
-  getContent: async (id) => (read.push(id), readContent({ mimeType: 'text/plain', body: { data: b64(textOf(id)) } })),
-});
-let known: RawMessage[];
 const textOf = (id: string) => `${id} `.repeat(MAX_BODY_CHARS);
+/** Every whole read of a message, by id. */
+const read = () => gmail.gmail.asked('users.messages.get').flatMap((r) => (r.format === 'full' && r.id ? [r.id] : []));
 
 const labelsOf = async (id: string) => (await raw(db).get<{ label_ids: string[] }>('SELECT label_ids FROM messages WHERE id = ?', id))?.label_ids;
-const sync = async () => await syncAccount(db, gmail(), await firstAccount(db), () => 5000);
+const sync = async () => await syncAccount(db, gmail.api, await firstAccount(db), () => NOW);
 
 beforeEach(async () => {
   db = await openUserDb(ACCOUNT);
-  cursor = 1;
-  known = [rawMessage('a'), rawMessage('b')];
-  inbox = [...known];
-  history = [];
-  read = [];
+  gmail = connectGmail(fake.google);
+  await recordSync(db, ACCOUNT, [], gmail.gmail.cursor(), NOW - DAY);
+  gmail.gmail.deliver({ id: 'a', from: 'News <news@example.com>', to: ACCOUNT, text: textOf('a'), at: NOW - DAY });
+  gmail.gmail.deliver({ id: 'b', from: 'News <news@example.com>', to: ACCOUNT, text: textOf('b'), at: NOW - 400 * DAY });
 });
 
 describe('a recorded message’s labels', () => {
   it('follow Gmail’s history, so what is in the inbox and what is unread can be read from the record', async () => {
     await sync();
     expect(await labelsOf('a')).toEqual(['INBOX', 'UNREAD']);
-    history = [
-      { messageId: 'a', added: [], removed: ['UNREAD'] },
-      { messageId: 'b', added: [], removed: ['INBOX'] },
-      { messageId: 'b', added: ['STARRED'], removed: [] },
-      { messageId: 'unrecorded', added: ['INBOX'], removed: [] },
-    ];
+    gmail.gmail.deliver({ id: 'unrecorded', from: 'ada@example.com', labelIds: [], at: NOW - 400 * DAY }, { quietly: true });
+    gmail.gmail.change('a', { remove: ['UNREAD'] });
+    gmail.gmail.change('b', { remove: ['INBOX'] });
+    gmail.gmail.change('b', { add: ['STARRED'] });
+    gmail.gmail.change('unrecorded', { add: ['INBOX'] });
     await sync();
     expect(await labelsOf('a')).toEqual(['INBOX']);
     expect((await labelsOf('b'))?.toSorted()).toEqual(['STARRED', 'UNREAD']);
@@ -73,14 +47,12 @@ describe('a recorded message’s labels', () => {
 
   it('end where the last change to each label left them, however often the same history is read', async () => {
     await sync();
-    const changes = [
-      { messageId: 'a', added: [], removed: ['INBOX'] },
-      { messageId: 'a', added: ['INBOX'], removed: [] },
-      { messageId: 'a', added: [], removed: ['UNREAD'] },
-    ];
-    history = [...changes];
+    const { historyId } = await firstAccount(db);
+    gmail.gmail.change('a', { remove: ['INBOX'] });
+    gmail.gmail.change('a', { add: ['INBOX'] });
+    gmail.gmail.change('a', { remove: ['UNREAD'] });
     await sync();
-    history = [...changes];
+    await recordSync(db, ACCOUNT, [], historyId!, NOW);
     await sync();
     expect(await labelsOf('a')).toEqual(['INBOX']);
   });
@@ -89,9 +61,9 @@ describe('a recorded message’s labels', () => {
 describe('the text Inbox keeps', () => {
   const options = (more: Partial<RunOptions> = {}): RunOptions => ({
     ephemeral: memoryEphemeral(),
-    connect: () => ({ api: gmail(), mailbox: new FakeMailbox() }),
+    connect: () => gmail,
     log: () => {},
-    now: () => 5000,
+    now: () => NOW,
     ...more,
   });
   const kept = async () =>
@@ -102,22 +74,22 @@ describe('the text Inbox keeps', () => {
 
   it('is all of the text of mail in the inbox, read only while Inbox is on, and goes when it is turned off', async () => {
     await runOnce(db, options());
-    expect(read).toEqual([]);
-    await setMail(db, true);
-    history = [{ messageId: 'b', added: [], removed: ['INBOX'] }];
+    expect(read()).toEqual([]);
+    await setMail(db, true, { now: NOW, window: 'year' });
+    gmail.gmail.change('b', { remove: ['INBOX'] });
     await runOnce(db, options());
-    expect(read).toEqual(['a']);
+    expect(read()).toEqual(['a']);
     expect(await kept()).toEqual([{ id: 'a', text: textOf('a').trim() }]);
     await runOnce(db, options());
-    expect(read).toEqual(['a']);
+    expect(read()).toEqual(['a']);
     await setMail(db, false);
     expect(await kept()).toEqual([]);
   });
 
   it('reads new mail once, whole, for the model and for Inbox alike', async () => {
-    await setMail(db, true);
+    await setMail(db, true, { now: NOW, window: 'year' });
     await runOnce(db, options({ model: async () => testModel() }));
-    expect(read.toSorted()).toEqual(['a', 'b']);
+    expect(read().toSorted()).toEqual(['a', 'b']);
     expect((await kept()).map((k) => k.id)).toEqual(['a', 'b']);
   });
 });

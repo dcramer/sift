@@ -1,112 +1,57 @@
 /**
- * Preloaded into the Next.js server `serve.ts` starts (`NODE_OPTIONS=--import`), before any of Sift loads: it
- * offers the app stand-ins for what Sift reaches outside this machine for (`StandIns`, src/sift/sift.ts). Everything
- * else is the real app on the seeded home.
+ * Preloaded into the Next.js server `serve.ts` starts (`NODE_OPTIONS=--import`), before any of Sift loads. Everything is
+ * the real app on the seeded home, Sift's own Gmail client among it, but for what Sift reaches outside this machine for:
  *
- * - Gmail: nothing has happened since the seed's last pass, and each mailbox's filters and messages' labels are a fake
- *   mailbox's, starting from those the seed left in the file `SIFT_STAND_INS` names and written back there as they change.
- *   Mail sent goes nowhere: each is added to `sent.json` beside that file, as `{ mailbox, id, threadId, raw }`.
- *   A search of the inbox finds nothing, or with `SIFT_STAND_INS_LISTING` set is still being listed for good, so
- *   applying a rule stays under way until it is stopped.
- * - The model that suggests labels, drafts rules and asks Inbox, a stand-in. Drafting looks up the second
+ * - Google: the fake the unit tests use (tests/google.ts), answering Google's own addresses in this process. It starts
+ *   from what the seed left in the file `SIFT_STAND_INS` names, Gmail as the seed's last pass left it, and is written
+ *   back there after each request that changes it, so a test reads what Gmail holds, and what was sent, from that file.
+ *   With `SIFT_STAND_INS_LISTING` set, me@example.org's inbox also holds 1,200 sales from the Store from before Sift,
+ *   `Found in Gmail 1` the newest, and Gmail never answers a search's second page, so applying a rule to them stays
+ *   under way until it is stopped.
+ * - The model that suggests labels, drafts rules and asks Inbox (`StandIns`, src/sift/sift.ts). Drafting looks up the second
  *   line of its prompt (the words the person typed), then fills in a rule archiving and marking read mail from the
  *   first sender found, with a note naming the second; nothing found fills in `nobody@example.com`. Asking looks up
  *   the words before any "about" the same way and narrows Inbox to the first sender found, searching for the words after it,
  *   or with neither says Sift cannot tell which mail you have answered. Suggesting gives Sales pitches when
  *   the words name pitches, Build results (Digest) when they name builds, and notes that Receipts and transactions
  *   covers receipts already when they name receipts; words naming none of these are an unusable answer. A pass is given no model.
- * - What Gmail would count: for Inbox's copy, 8,240 messages in the last year, 21,500 in three and 46,800 in all; an inbox
- *   of 2,412 messages (the newest 300 while setting up), three in four needing
- *   the model at about a tenth of a cent each; and for any rule about 1,240 messages it would decide, the newest
- *   five `Found in Gmail 1` to `5`, none needing the model.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from '@earendil-works/pi-ai';
-import type { ExistingFilter } from '../../../../src/actions/filters.ts';
 import type { StandIns } from '../../../../src/sift/sift.ts';
-import type { GmailApi } from '../../../../src/gmail/api.ts';
 import { PROPOSAL_TOOL } from '../../../../src/triage/proposal.ts';
 import { FILL_TOOL, FIND_TOOL } from '../../../../src/triage/rule-draft.ts';
 import { ASK_TOOL } from '../../../../src/triage/mail-ask.ts';
-import { FakeMailbox } from '../../../../tests/helpers.ts';
-import { seal } from '../../../../src/plain.ts';
+import { FakeGoogle, serveGoogle } from '../../../../tests/google.ts';
 
 const file = process.env['SIFT_STAND_INS'];
-if (!file) throw new Error('SIFT_STAND_INS names no file of filters');
-const saved = JSON.parse(readFileSync(file, 'utf8')) as { filters: Record<string, ExistingFilter[]>; labels: Record<string, Record<string, string[]>> };
-
-const sentFile = join(dirname(file), 'sent.json');
-
-/** A mailbox whose filters and labels are written back to the file each time they change, and whose sent mail is written down. */
-class SavedMailbox extends FakeMailbox {
-  readonly address: string;
-  constructor(address: string) {
-    super();
-    this.address = address;
-  }
-  override async send(message: { raw: string; threadId?: string }) {
-    const sent = await super.send(message);
-    const before = existsSync(sentFile) ? (JSON.parse(readFileSync(sentFile, 'utf8')) as unknown[]) : [];
-    writeFileSync(sentFile, JSON.stringify([...before, { mailbox: this.address, ...sent, raw: message.raw }], null, 1));
-    return sent;
-  }
-  override async modifyLabels(...args: Parameters<FakeMailbox['modifyLabels']>) {
-    const after = await super.modifyLabels(...args);
-    save();
-    return after;
-  }
-  override async createFilter(...args: Parameters<FakeMailbox['createFilter']>) {
-    const made = await super.createFilter(...args);
-    save();
-    return made;
-  }
-  override async deleteFilter(id: string) {
-    await super.deleteFilter(id);
-    save();
-  }
-}
-const mailboxes = new Map<string, SavedMailbox>();
-const save = () =>
-  writeFileSync(
-    file,
-    JSON.stringify(
-      {
-        filters: Object.fromEntries([...mailboxes].map(([id, m]) => [id, m.filters])),
-        labels: Object.fromEntries([...mailboxes].map(([id, m]) => [id, Object.fromEntries(m.labels)])),
-      },
-      null,
-      1,
-    ),
-  );
-const mailboxOf = (address: string) => {
-  let mailbox = mailboxes.get(address);
-  if (!mailbox) {
-    mailbox = new SavedMailbox(address);
-    mailbox.filters = saved.filters[address] ?? [];
-    mailbox.labels = new Map(Object.entries(saved.labels[address] ?? {}));
-    mailboxes.set(address, mailbox);
-  }
-  return mailbox;
+if (!file) throw new Error('SIFT_STAND_INS names no file of what Google holds');
+const google = FakeGoogle.restore(JSON.parse(readFileSync(file, 'utf8')) as ReturnType<FakeGoogle['save']>);
+// Whole or not at all, for a test reading it meanwhile.
+const save = () => {
+  writeFileSync(`${file}.next`, JSON.stringify(google.save()));
+  renameSync(`${file}.next`, file);
 };
-
-const listing = Boolean(process.env['SIFT_STAND_INS_LISTING']);
-/** A Gmail where nothing has happened since the seed's last pass. */
-const nothingNew = (address: string): GmailApi => ({
-  getProfile: async () => ({ emailAddress: address, historyId: '1' }),
-  listHistory: async () => ({ additions: [], historyId: '1' }),
-  searchInbox: listing ? () => new Promise<never>(() => {}) : async () => ({ ids: [] }),
-  inboxSize: async () => 0,
-  searchMail: async () => ({ ids: [] }),
-  mailboxSize: async () => 0,
-  getMessage: async () => null,
-  getMetadata: async () => null,
-  getLabelIds: async () => null,
-  listLabels: async () => [],
-  getContent: async () => null,
-  getThread: async () => null,
-  listSendAs: async () => [address],
-});
+if (process.env['SIFT_STAND_INS_LISTING']) {
+  const gmail = google.mailbox('me@example.org');
+  const before = Date.now() - 2 * 86_400_000;
+  for (let i = 1; i <= 1200; i++)
+    gmail.deliver(
+      {
+        from: 'Store <sale@store.example.com>',
+        to: 'me@example.org',
+        subject: `Found in Gmail ${i}`,
+        labelIds: ['INBOX', 'CATEGORY_PROMOTIONS'],
+        at: before - i * 60_000,
+        headers: { 'List-Id': '<store.example.com>' },
+      },
+      { quietly: true },
+    );
+  gmail.holdPages = true;
+  save();
+}
+google.onChange = save;
+serveGoogle(() => google).listen();
 
 /** What the stand-in reads of a call: the tools it is given come in a message of their own. */
 type Context = { messages: readonly { role: string; content: unknown; toolsAdded?: readonly { name: string }[] }[] };
@@ -172,30 +117,5 @@ const answer = (context: Context) => {
 };
 faux.setResponses([answer, answer]);
 
-const standIns: StandIns = {
-  gmail: (address) => ({ api: nothingNew(address), mailbox: mailboxOf(address) }),
-  model: { spec: 'faux/stand-in', models, model: faux.getModel(), reasoning: 'low' },
-  inbox: {
-    inboxEstimate: async (_db, _mailboxes, reach) =>
-      reach === 'inbox' ? { messages: 2412, model: 1830, cost: 3.1 } : { messages: 300, model: 228, cost: 0.39 },
-    mailReach: async () => ({
-      year: { messages: 8240, bytes: 247_200_000, minutes: 103 },
-      three_years: { messages: 21_500, bytes: 645_000_000, minutes: 269 },
-      all: { messages: 46_800, bytes: 1_404_000_000, minutes: 585 },
-    }),
-    ruleInbox: async () => ({
-      examples: Array.from({ length: 5 }, (_, i) => ({
-        accountId: 'me@example.org',
-        messageId: `g${i + 1}`,
-        subject: seal(`Found in Gmail ${i + 1}`),
-        receivedAt: Date.now() - (i + 1) * 3_600_000,
-      })),
-      messages: 1240,
-      reading: 0,
-      exact: false,
-      most: null,
-      costEach: null,
-    }),
-  },
-};
+const standIns: StandIns = { model: { spec: 'faux/stand-in', models, model: faux.getModel(), reasoning: 'low' } };
 (globalThis as Record<symbol, unknown>)[Symbol.for('sift.stand-ins')] = standIns;

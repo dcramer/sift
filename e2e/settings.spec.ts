@@ -28,9 +28,9 @@ test.describe('Settings', () => {
   test('turning Sift on offers to go through the inbox, with what it would cost', async ({ page }) => {
     await page.goto('/?settings=1');
     await confirmTurnOn(page);
-    await expect(goThrough(page).getByText('$3.10')).toBeVisible();
-    await expect(goThrough(page).getByText('1,830')).toBeVisible();
-    await goThrough(page).getByRole('button', { name: 'Go through 2,412' }).click();
+    await expect(goThrough(page).getByText('$0.06')).toBeVisible();
+    await expect(goThrough(page).getByText('15', { exact: true })).toBeVisible();
+    await goThrough(page).getByRole('button', { name: 'Go through 21' }).click();
     await expect(goThrough(page)).toHaveCount(0);
     await expect(settingsActive(page).getByText('On', { exact: true })).toBeVisible();
     await expect(settingsActive(page).getByText('Going through your inbox')).toBeVisible();
@@ -52,7 +52,7 @@ test.describe('Settings', () => {
         ),
       ).toBeVisible();
       await expect(settings(page).getByText('About $0.40 per 1,000 messages at API prices, which your ChatGPT plan covers.')).toBeVisible();
-      await expect(settingsActive(page).getByText('2,412 messages. About $3.10 at API prices, which your ChatGPT plan covers.')).toBeVisible();
+      await expect(settingsActive(page).getByText('21 messages. About $0.01 at API prices, which your ChatGPT plan covers.')).toBeVisible();
       await settingsActive(page).getByRole('button', { name: 'Go through…' }).click();
       await expect(goThrough(page).getByText('on gpt-5.6-luna, at API prices')).toBeVisible();
       await goThrough(page).getByRole('button', { name: 'Not now' }).click();
@@ -65,9 +65,9 @@ test.describe('Settings', () => {
 
   test('goes through the inbox from Settings, and stops', async ({ page }) => {
     await page.goto('/?settings=1');
-    await expect(settingsActive(page).getByText('2,412 messages. Going through them costs about $3.10.')).toBeVisible();
+    await expect(settingsActive(page).getByText('21 messages. Going through them costs about $0.06.')).toBeVisible();
     await settingsActive(page).getByRole('button', { name: 'Go through…' }).click();
-    await goThrough(page).getByRole('button', { name: 'Go through 2,412' }).click();
+    await goThrough(page).getByRole('button', { name: 'Go through 21' }).click();
     await settingsActive(page).getByRole('button', { name: 'Stop' }).click();
     await expect(settingsActive(page).getByText('Stopped after 0 messages', { exact: false })).toBeVisible();
     await expect(settingsActive(page).getByRole('button', { name: 'Go through again…' })).toBeVisible();
@@ -262,8 +262,8 @@ test.describe('Inbox in Settings', () => {
     await settingsInbox(page).getByRole('button', { name: 'Turn on', exact: true }).click();
     const choices = mailWindow(page).getByRole('radiogroup', { name: 'How far back' });
     await expect(choices.getByRole('radio', { name: /^The last year/ })).toHaveAttribute('aria-checked', 'true');
-    await expect(choices.getByRole('radio', { name: /^The last year/ })).toContainText('About 8,200 messages · 247 MB · 1 h 43 min to copy');
-    await expect(choices.getByRole('radio', { name: /^All of it/ })).toContainText('About 47K messages · 1.4 GB · 9 h 45 min to copy');
+    await expect(choices.getByRole('radio', { name: /^The last year/ })).toContainText('About 21 messages · 630 KB · 1 min to copy');
+    await expect(choices.getByRole('radio', { name: /^All of it/ })).toContainText('About 22 messages · 660 KB · 1 min to copy');
     await choices.getByRole('radio', { name: /^The last three years/ }).click();
     await mailWindow(page).getByRole('button', { name: 'Turn on', exact: true }).click();
     await expect(mailWindow(page)).toHaveCount(0);
@@ -277,7 +277,7 @@ test.describe('Inbox in Settings', () => {
     test('shows the copy going, and widening or narrowing the window changes it, narrowing only after asking', async ({ page }) => {
       await page.goto('/?settings=1');
       await expect(settingsInbox(page).getByText('Copying the last year')).toBeVisible();
-      await expect(settingsInbox(page).getByText(/^1,240 of about 8,240/)).toBeVisible();
+      await expect(settingsInbox(page).getByText(/^10 of about 21 /)).toBeVisible();
 
       await settingsInbox(page).getByRole('button', { name: 'Change…' }).click();
       await mailWindow(page)

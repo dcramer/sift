@@ -11,8 +11,12 @@ import { setMail } from '../src/store/preferences.ts';
 import { people } from '../src/store/people.ts';
 import type { Sql } from '../src/store/sql.ts';
 import type { Store } from '../src/store/store.ts';
-import { onePerson, openUserDb, raw, startDashboard } from './fixtures.ts';
-import { ACCOUNT, FakeMailbox, everything, facts } from './helpers.ts';
+import type { Mailbox } from '../src/actions/mailbox.ts';
+import { connectGmail, fakeGoogle, onePerson, openUserDb, raw, startDashboard } from './fixtures.ts';
+import type { FakeGmail } from './google.ts';
+import { ACCOUNT, everything, facts } from './helpers.ts';
+
+const fake = fakeGoogle();
 
 const AT = Date.UTC(2026, 10, 19, 8, 30);
 const ID = '<a1b2@example.org>';
@@ -90,7 +94,8 @@ describe('building a message', () => {
 
 describe('sending', () => {
   let db: Sql;
-  let mailbox: FakeMailbox;
+  let mailbox: Mailbox;
+  let gmail: FakeGmail;
   let clock = AT;
   const send = (id = ID, more: Partial<Outgoing> = {}) =>
     sendMail({ db, mailbox, now: () => clock }, { accountId: ACCOUNT, id, threadId: 't1', mail: mail(more) });
@@ -98,7 +103,8 @@ describe('sending', () => {
 
   beforeEach(async () => {
     db = await openUserDb(ACCOUNT);
-    mailbox = new FakeMailbox();
+    ({ mailbox, gmail } = connectGmail(fake.google, ACCOUNT, { send: true }));
+    gmail.deliver({ threadId: 't1', from: 'Ada <ada@example.com>', subject: 'Lunch' });
     clock = AT;
   });
 
@@ -108,12 +114,13 @@ describe('sending', () => {
     await expect(send()).rejects.toThrow('Google has not let Sift send');
     await setCanSend(db, ACCOUNT, true);
     await expect(send(ID, { from: { address: 'someone@example.com' } })).rejects.toThrow('is not an address of');
-    expect(mailbox.sent.size).toBe(0);
+    expect(gmail.asked('users.messages.send')).toEqual([]);
     expect(await tries()).toEqual([]);
 
     await setMailboxAliases(db, ACCOUNT, ['me@work.example.com']);
-    expect(await send(ID, { from: { address: 'me@work.example.com' } })).toEqual({ id: 'sent-1', threadId: 't1' });
-    expect(mailbox.sent.get('sent-1')).toMatchObject({ threadId: 't1' });
+    const sent = await send(ID, { from: { address: 'me@work.example.com' } });
+    expect(gmail.sent()).toMatchObject([{ id: sent.id, threadId: 't1' }]);
+    expect(sent).toEqual({ id: gmail.sent()[0]!.id, threadId: 't1' });
   });
 
   describe('once allowed', () => {
@@ -123,7 +130,7 @@ describe('sending', () => {
     });
 
     it('is written to the audit log first, naming who it went to and its subject, and settled from Gmail’s answer', async () => {
-      expect((await send()).id).toBe('sent-1');
+      expect((await send()).id).toBe(gmail.sent()[0]!.id);
       expect(await getAction(db, 1)).toMatchObject({
         type: 'send',
         status: 'done',
@@ -135,57 +142,51 @@ describe('sending', () => {
     });
 
     it('does not send twice when the answer to a try that went was lost', async () => {
-      mailbox.failSend = 'after';
-      await expect(send()).rejects.toThrow('timeout');
+      gmail.fail('users.messages.send', 'lost');
+      await expect(send()).rejects.toThrow('Network error');
       expect(await tries()).toEqual([{ type: 'send', status: 'unknown', message_id: null }]);
-      mailbox.failSend = null;
-      expect((await send()).id).toBe('sent-1');
-      expect(mailbox.sent.size).toBe(1);
+      expect((await send()).id).toBe(gmail.sent()[0]!.id);
+      expect(gmail.sent()).toHaveLength(1);
       expect(await tries()).toEqual([{ type: 'send', status: 'done', message_id: null }]);
     });
 
     it('sends again when the try before it never went, once Gmail has had time to show it if it had', async () => {
-      mailbox.failSend = 'before';
-      await expect(send()).rejects.toThrow('network down');
-      mailbox.failSend = null;
+      gmail.fail('users.messages.send', 'network');
+      await expect(send()).rejects.toThrow('Network error');
       clock = AT + SETTLE_MS - 1;
       await expect(send()).rejects.toThrow('cannot tell yet whether this went');
-      expect(mailbox.sent.size).toBe(0);
+      expect(gmail.sent()).toEqual([]);
       clock = AT + SETTLE_MS;
-      expect((await send()).id).toBe('sent-1');
+      expect((await send()).id).toBe(gmail.sent()[0]!.id);
       expect(await tries()).toEqual([
         { type: 'send', status: 'failed', message_id: null },
         { type: 'send', status: 'done', message_id: null },
       ]);
       // Another press is mail of its own.
-      expect((await send('<a2@example.org>')).id).toBe('sent-2');
+      expect((await send('<a2@example.org>')).id).toBe(gmail.sent()[1]!.id);
     });
 
     it('does not send again while Gmail’s search has yet to show a try whose answer was lost', async () => {
-      mailbox.failSend = 'after';
-      await expect(send()).rejects.toThrow('timeout');
-      mailbox.failSend = null;
-      const finding = mailbox.findByMessageId.bind(mailbox);
-      mailbox.findByMessageId = async () => null;
+      gmail.lagSearch = true;
+      gmail.fail('users.messages.send', 'lost');
+      await expect(send()).rejects.toThrow('Network error');
       clock = AT + 5000;
       await expect(send()).rejects.toThrow('cannot tell yet whether this went');
-      expect(mailbox.sent.size).toBe(1);
-      mailbox.findByMessageId = finding;
-      expect((await send()).id).toBe('sent-1');
-      expect(mailbox.sent.size).toBe(1);
+      expect(gmail.sent()).toHaveLength(1);
+      gmail.index();
+      expect((await send()).id).toBe(gmail.sent()[0]!.id);
+      expect(gmail.sent()).toHaveLength(1);
     });
 
     it('does not send over a try still waiting on Gmail', async () => {
-      const sending = mailbox.send.bind(mailbox);
       let pressedAgain: Promise<unknown> | undefined;
-      mailbox.send = async (message) => {
+      gmail.whileAsked('users.messages.send', async () => {
         pressedAgain = send().catch((error: unknown) => error);
         await pressedAgain;
-        return await sending(message);
-      };
-      expect((await send()).id).toBe('sent-1');
+      });
+      expect((await send()).id).toBe(gmail.sent()[0]!.id);
       expect(String(await pressedAgain)).toContain('cannot tell yet whether this went');
-      expect(mailbox.sent.size).toBe(1);
+      expect(gmail.sent()).toHaveLength(1);
     });
 
     it('answers that mail went though the record of it could not be written, so it is not sent again', async () => {
@@ -194,14 +195,14 @@ describe('sending', () => {
         get: (to, key) => (key === 'transaction' ? async () => await Promise.reject(new Error('database gone')) : Reflect.get(to, key)),
       });
       const sent = await sendMail({ db: failing, mailbox, now: () => clock }, { accountId: ACCOUNT, id: ID, threadId: 't1', mail: mail() });
-      expect(sent).toEqual({ id: 'sent-1', threadId: 't1' });
-      expect(await queuedMessage(db, ACCOUNT, 'sent-1')).toBeNull();
+      expect(sent).toEqual({ id: gmail.sent()[0]!.id, threadId: 't1' });
+      expect(await queuedMessage(db, ACCOUNT, sent.id)).toBeNull();
       expect(await tries()).toEqual([{ type: 'send', status: 'done', message_id: null }]);
     });
 
     it('keeps what went in the record, as theirs and not mail to triage, with the text they wrote', async () => {
-      await send(ID, { cc: [{ address: 'bo@example.com' }], inReplyTo: '<x2@example.com>', references: ['<x2@example.com>'] });
-      expect(await queuedMessage(db, ACCOUNT, 'sent-1')).toMatchObject({
+      const { id } = await send(ID, { cc: [{ address: 'bo@example.com' }], inReplyTo: '<x2@example.com>', references: ['<x2@example.com>'] });
+      expect(await queuedMessage(db, ACCOUNT, id)).toMatchObject({
         facts: {
           threadId: 't1',
           labelIds: ['SENT'],
@@ -219,22 +220,18 @@ describe('sending', () => {
     });
 
     it('is kept by the try that finds it went, when the answer to the one that sent it was lost', async () => {
-      mailbox.failSend = 'after';
-      await expect(send()).rejects.toThrow('timeout');
-      expect(await queuedMessage(db, ACCOUNT, 'sent-1')).toBeNull();
-      mailbox.failSend = null;
+      gmail.fail('users.messages.send', 'lost');
+      await expect(send()).rejects.toThrow('Network error');
+      const [went] = gmail.sent();
+      expect(await queuedMessage(db, ACCOUNT, went!.id)).toBeNull();
       await send();
-      expect(await queuedMessage(db, ACCOUNT, 'sent-1')).toMatchObject({ facts: { threadId: 't1' } });
+      expect(await queuedMessage(db, ACCOUNT, went!.id)).toMatchObject({ facts: { threadId: 't1' } });
     });
 
     it('is not kept once Inbox is off', async () => {
-      const sending = mailbox.send.bind(mailbox);
-      mailbox.send = async (message) => {
-        await setMail(db, false);
-        return await sending(message);
-      };
-      await send();
-      expect(await queuedMessage(db, ACCOUNT, 'sent-1')).toBeNull();
+      gmail.whileAsked('users.messages.send', async () => await setMail(db, false));
+      const { id } = await send();
+      expect(await queuedMessage(db, ACCOUNT, id)).toBeNull();
     });
 
     it('cannot be undone', async () => {
@@ -247,19 +244,20 @@ describe('sending', () => {
 describe('from the dashboard', () => {
   let db: Sql;
   let store: Store;
-  let mailbox: FakeMailbox;
+  let mailbox: Mailbox;
+  let gmail: FakeGmail;
   const NEW = { accountId: ACCOUNT, id: ID, from: { address: ACCOUNT }, to: [{ address: 'ada@example.com' }], cc: [], text: 'Hello' };
 
   beforeEach(async () => {
     ({ store, db } = await onePerson(ACCOUNT));
-    mailbox = new FakeMailbox();
+    ({ mailbox, gmail } = connectGmail(fake.google, ACCOUNT, { send: true }));
   });
 
   const start = async () => {
     const controls = { send: async (target: Sql, sending: Parameters<Controls['send']>[1]) => await sendMail({ db: target, mailbox, now: () => AT }, sending) };
     return (await startDashboard(people(store), { controls: controls as unknown as Controls })).call;
   };
-  const sentHeaders = () => headersOf([...mailbox.sent.values()][0]!.raw);
+  const sentHeaders = () => headersOf(gmail.sent()[0]!.raw);
 
   it('says why it may not send, in words for the person', async () => {
     const call = await start();
@@ -274,8 +272,10 @@ describe('from the dashboard', () => {
       error: '"Ada <ada@example.com>" is not an address Sift can send to.',
     });
     expect((await call('POST', '/api/mail/send', { ...NEW, subject: 'Hi', to: [] })).body).toEqual({ error: 'Say who the mail is to.' });
-    expect(mailbox.sent.size).toBe(0);
-    expect(await call('POST', '/api/mail/send', { ...NEW, subject: 'Hi' })).toMatchObject({ status: 200, body: { id: 'sent-1', threadId: 'sent-1' } });
+    expect(gmail.sent()).toEqual([]);
+    const answered = await call('POST', '/api/mail/send', { ...NEW, subject: 'Hi' });
+    const [sent] = gmail.sent();
+    expect(answered).toMatchObject({ status: 200, body: { id: sent!.id, threadId: sent!.id } });
     expect(sentHeaders()).toMatchObject({ Subject: 'Hi', To: 'ada@example.com' });
   });
 
@@ -297,14 +297,17 @@ describe('from the dashboard', () => {
         ],
         '2',
       );
+      gmail.deliver({ id: 'm1', threadId: 't9', from: 'ada@example.com', subject: 'Lunch' });
     });
 
     it('goes into the conversation, following the message it answers as the record has it, not as the page says', async () => {
       const call = await start();
-      expect((await call('POST', '/api/mail/send', { ...NEW, replyTo: { messageId: 'm1' } })).body).toEqual({ id: 'sent-1', threadId: 't9' });
-      expect([...mailbox.sent.values()][0]!.threadId).toBe('t9');
+      const answered = await call('POST', '/api/mail/send', { ...NEW, replyTo: { messageId: 'm1' } });
+      const [sent] = gmail.sent();
+      expect(answered.body).toEqual({ id: sent!.id, threadId: 't9' });
+      expect(sent!.threadId).toBe('t9');
       expect(sentHeaders()).toMatchObject({ Subject: 'Re: Lunch', 'In-Reply-To': '<m1@example.com>', References: '<m0@example.com> <m1@example.com>' });
-      expect(await queuedMessage(db, ACCOUNT, 'sent-1')).toMatchObject({ facts: { threadId: 't9', subject: 'Re: Lunch' } });
+      expect(await queuedMessage(db, ACCOUNT, sent!.id)).toMatchObject({ facts: { threadId: 't9', subject: 'Re: Lunch' } });
       // The page names the conversation by the message alone.
       expect((await call('POST', '/api/mail/send', { ...NEW, replyTo: { messageId: 'm1' }, subject: 'Other' })).status).toBe(400);
     });
@@ -329,7 +332,7 @@ describe('from the dashboard', () => {
       const call = await start();
       expect((await call('POST', '/api/mail/send', { ...NEW, replyTo: { messageId: 'nope' } })).status).toBe(400);
       expect(await replyTo(db, await everything(db), 'other@example.org', 'm1')).toBeNull();
-      expect(mailbox.sent.size).toBe(0);
+      expect(gmail.sent()).toEqual([]);
     });
   });
 });

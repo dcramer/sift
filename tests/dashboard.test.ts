@@ -10,15 +10,16 @@ import { people } from '../src/store/people.ts';
 import { recordSync } from '../src/store/accounts.ts';
 import { finishAction, insertPendingAction, setActionStatus } from '../src/store/actions.ts';
 import { recordDecision, settleDecision } from '../src/store/decisions.ts';
-import { firstAccount, modelRun, openUserDb, raw, startDashboard, onePerson, unmarked } from './fixtures.ts';
+import { connectGmail, fakeGoogle, firstAccount, modelRun, openUserDb, raw, startDashboard, onePerson, unmarked } from './fixtures.ts';
 import type { Store } from '../src/store/store.ts';
 import { addRule, countRuleHit, removeRule } from '../src/store/rules.ts';
-import { ACCOUNT, DAY, codeSignIn, everything, facts, quietSources, testModel } from './helpers.ts';
+import { ACCOUNT, DAY, codeSignIn, everything, facts, testModel } from './helpers.ts';
 import { conditionsHash } from '../src/store/content.ts';
 import { triageAccount } from '../src/work/triage.ts';
 import { applyFeedback } from '../src/learn/feedback.ts';
 import { plain } from '../src/plain.ts';
 
+const fake = fakeGoogle();
 const NOW = Date.UTC(2026, 5, 15, 12);
 
 /** A model call two days ago that cost `costUsd`. */
@@ -109,24 +110,11 @@ describe('tracking', () => {
 
   it('links an action to the decision it carried out', async () => {
     const db = await seeded();
-    const labels = ['INBOX'];
-    const mailbox = {
-      getLabelIds: async () => [...labels],
-      modifyLabels: async (_id: string, change: { add: string[]; remove: string[] }) => {
-        labels.splice(0, labels.length, ...labels.filter((l) => !change.remove.includes(l)), ...change.add);
-        return [...labels];
-      },
-      ensureLabel: async (name: string) => `L:${name}`,
-      hasSentTo: async () => false,
-      createFilter: async () => 'f',
-      deleteFilter: async () => {},
-      listFilters: async () => [],
-      insertMessage: async () => ({ id: 'i', labelIds: [] }),
-      findByMessageId: async () => null,
-      send: async () => ({ id: 's', threadId: 's', labelIds: [] }),
-    };
+    const { mailbox, gmail } = connectGmail(fake.google);
+    gmail.deliver({ id: 'a', from: 'news@example.com', labelIds: ['INBOX'] });
     await execute({ db, mailbox, now: () => NOW }, ACCOUNT, 'a', { type: 'archive' }, 1);
     expect(await raw(db).get('SELECT decision_id, status FROM actions')).toEqual({ decision_id: 1, status: 'done' });
+    expect(gmail.message('a')!.labelIds).not.toContain('INBOX');
     expect((await summarize(db, await everything(db), 7, NOW)).recent.find((r) => r.id === 1)).toMatchObject({
       actionId: 1,
       actionStatus: 'done',
@@ -420,7 +408,7 @@ describe('dashboard server', () => {
     const id = await addRule(db, { match: { fromDomain: ['shop.example.com'] }, labelId: 'newsletter', when: 'a sale' }, 'user', NOW);
     const usage = { model: 'test/model', inputTokens: 1, outputTokens: 1, costUsd: 0.03 };
     const model = testModel(async ({ evidence }) => ({ label: evidence.facts.messageId === 'sale' ? 'newsletter' : 'personal', reason: 'r', usage }));
-    await triageAccount({ db, mailbox: null, model, sources: quietSources(), now: () => NOW }, await firstAccount(db));
+    await triageAccount({ db, mailbox: null, model, sources: connectGmail(fake.google), now: () => NOW }, await firstAccount(db));
     await modelRun(db, { messageId: 'sale', ruleId: id, at: NOW - 31 * DAY, usage: { ...usage, costUsd: 1 } });
 
     const [rule] = await listRuleSummaries(db, await everything(db), NOW);

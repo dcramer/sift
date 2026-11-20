@@ -15,14 +15,15 @@ import { mailBodies } from '../src/store/query.ts';
 import { searchedWords } from '../src/store/search.ts';
 import type { Sql } from '../src/store/sql.ts';
 import { runOnce } from '../src/work/run.ts';
-import { freshStore, personWith, raw } from './fixtures.ts';
-import { ACCOUNT, FakeMailbox, facts, gmailOf } from './helpers.ts';
+import { connectGmail, fakeGoogle, freshStore, personWith, raw } from './fixtures.ts';
+import { ACCOUNT, facts } from './helpers.ts';
 
 const A = loadKeyring({ SIFT_KEY: 'search-a' });
 const B_AFTER_A = loadKeyring({ SIFT_KEY: 'search-b', SIFT_OLD_KEYS: 'search-a' });
 const ada = { address: 'ada@example.org', domain: 'example.org', name: 'Ada Lovelace' };
 const scope = scopeFor([ACCOUNT], true);
 const read = { hasAttachments: false } as const;
+const fake = fakeGoogle();
 
 describe('the words search reads', () => {
   it('are runs of letters and digits, lowercased, with accents taken off', () => {
@@ -153,7 +154,7 @@ describe('Inbox’s search', () => {
       .values({ accountId: ACCOUNT, messageId: 'old', bodyText: sealPart(db, ACCOUNT, 'old', 'text', 'Soot everywhere.')!, fetchedAt: 0 });
     expect(await searchDue(db, ACCOUNT)).toBe(true);
     expect(await found('soot')).toEqual([]);
-    const results = await runOnce(db, { ephemeral: memoryEphemeral(), connect: () => ({ api: gmailOf([]), mailbox: new FakeMailbox() }), log: () => {} });
+    const results = await runOnce(db, { ephemeral: memoryEphemeral(), connect: () => connectGmail(fake.google), log: () => {} });
     expect(results[0]).toMatchObject({ indexed: 1 });
     expect(await searchDue(db, ACCOUNT)).toBe(false);
     expect(await found('soot chimney')).toEqual([['old', 'inbox']]);

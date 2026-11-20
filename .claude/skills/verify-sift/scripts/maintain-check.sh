@@ -12,7 +12,7 @@ set -euo pipefail
 STATE="$HOME/.cache/sift-verify-maint"
 SKILL=.claude/skills/verify-sift
 # What a user meets, and what the seed imports. The skill's own changes are not drift: a merged maintenance PR would ask again.
-WATCH=(app web/src public src/dashboard src/cli src/store src/work src/sift tests/helpers.ts)
+WATCH=(app web/src public src/dashboard src/cli src/store src/work src/sift tests/helpers.ts tests/google.ts)
 mkdir -p "$STATE"
 cd "${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel)}"
 

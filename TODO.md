@@ -76,6 +76,7 @@ The working list for sift. Remove an item when it lands; add what you find. What
 - [ ] **Contacts: the people the person writes to.** Contacts lists only who has mail in the record. Who the person wrote to is kept only as a keyed hash of senders Sift checked (`correspondents`), and mail sent outside Sift is not recorded at all, so someone written to who never wrote back has no address to list. The table of addresses above, filled from sent mail too, would hold them.
 - [ ] **Inbox: turning it on does not ask Google for `gmail.send`.** The composer asks, per mailbox, once the person has written something; turning Inbox on should send them through Google for it, as docs/inbox.md once planned.
 - [ ] **Inbox: a reply does not quote what it answers, and a forward leaves out its attachments** and starts a conversation of its own, where Gmail keeps it in the one forwarded. Quote under a reply as a forward does; keep a forward's conversation (`threadId`, which `SendRequest` takes only for a reply); attachments need Gmail's parts read at send time, since Sift keeps none.
+- [ ] **Editing a rule leaves its waiting mail as it decided it.** `redecide` looks only at suggestions, which mail a user's rule decided is not, so a rule changed from keep to spam still lists its waiting mail as kept (`/api/rules/waiting`). Decide whether an edit decides that mail again.
 
 ## Phone
 
@@ -140,3 +141,4 @@ Sift has run on the owner's inbox while off. Nothing that changes the mailbox ha
 - [ ] **`tests/docs.test.ts` fails in a fresh worktree**: `BUILT` takes only `.gitignore` entries without a slash, so a doc naming `app/.well-known/workflow/` fails until a build makes it. Take ignored paths with a slash too.
 - [ ] **oxfmt rewrites a doc's tables** when given a Markdown file. Have it ignore Markdown, so `oxfmt <file>` on a doc does nothing.
 - [ ] **A test that no route needs a mailbox**: each `/api/` read answers without `?mailbox=`, from all the person's mailboxes (AGENTS.md's rule says so; nothing enforces it).
+- [ ] **The API's integration tests stop where a pass needs a model.** `startSift` gives a pass none, so going through the inbox and a test run are driven only to starting and stopping (`tests/api/settings.test.ts`, `tests/api/review.test.ts`), and For review's mail is the model's answer recorded by hand (`judged`). Give a pass the stand-in model in tests to drive them to the end.

@@ -201,10 +201,16 @@ async function spamRefusal(deps: ActionDeps, accountId: string, messageId: strin
 
 /**
  * Reverse a completed action exactly: remove what it added, restore what it removed. Labels the user
- * has changed since are left as they are. The undo is itself an audited action.
+ * has changed since are left as they are. The undo is itself an audited action. One whose answer was lost
+ * (`unknown`) is settled from the mailbox first, and undone only if it landed.
  */
 export async function undo(deps: ActionDeps, actionId: number): Promise<Outcome> {
-  const action: ActionRecord | null = await getAction(deps.db, actionId);
+  let action: ActionRecord | null = await getAction(deps.db, actionId);
+  if (action?.status === 'unknown' && action.type !== 'unsubscribe') {
+    await reconcile(deps, { accountId: action.accountId, messageId: action.messageId });
+    action = await getAction(deps.db, actionId);
+    if (action?.status === 'failed') return { status: 'skipped', reason: 'Gmail never made that change' };
+  }
   if (!action) throw new Refusal(`There is no change #${actionId}.`);
   if (action.type === 'undo') throw new Refusal(`Change #${actionId} is itself an undo.`);
   if (action.type === 'filter' || action.type === 'unfilter') throw new Refusal('A Gmail filter is added or taken out from its rule, not undone.');

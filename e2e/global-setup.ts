@@ -22,7 +22,7 @@ export default async function setup() {
         '--disable-warning=ExperimentalWarning',
         SEED,
         join(dir, 'home'),
-        join(dir, 'gmail.json'),
+        join(dir, 'google.json'),
         ...args,
       ]);
       process.env[`${TEMPLATES}_${name}`] = JSON.stringify({ dir, cookie: stdout.trim() });

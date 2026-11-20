@@ -5,8 +5,10 @@ import { RETRY_AFTER_MS, isPublicAddress, unsubscribe } from '../src/actions/uns
 import { messageDetail } from '../src/dashboard/queries/messages.ts';
 import { recordSync } from '../src/store/accounts.ts';
 import { getAction, insertPendingAction } from '../src/store/actions.ts';
-import { openUserDb, raw } from './fixtures.ts';
-import { ACCOUNT, everything, facts, FakeMailbox } from './helpers.ts';
+import { connectGmail, fakeGoogle, openUserDb, raw } from './fixtures.ts';
+import { ACCOUNT, everything, facts } from './helpers.ts';
+
+const fake = fakeGoogle();
 
 const ONE_CLICK = {
   'list-unsubscribe': '<mailto:leave@example.com>, <https://lists.example.com/u/token123>',
@@ -64,7 +66,7 @@ describe('unsubscribe', () => {
     await unsubscribe(deps(), ACCOUNT, 'm');
     expect(await unsubscribe(deps(), ACCOUNT, 'm2')).toEqual({ status: 'refused', reason: 'You have already unsubscribed from this sender.' });
     expect(posts).toHaveLength(1);
-    await expect(undo({ db, mailbox: new FakeMailbox() }, 1)).rejects.toThrow('cannot be undone');
+    await expect(undo({ db, mailbox: connectGmail(fake.google).mailbox }, 1)).rejects.toThrow('cannot be undone');
   });
 
   it('refuses a list that can only be left by email or a page, and a message that offers nothing', async () => {
@@ -105,8 +107,8 @@ describe('unsubscribe', () => {
 
   it('cut short by sift stopping, is settled as unknown and waits a week like a failure, never taken as done', async () => {
     await message('m', { ...ONE_CLICK, ...PROVEN });
-    const mailbox = new FakeMailbox();
-    mailbox.labels.set('m', ['INBOX']);
+    const { mailbox, gmail } = connectGmail(fake.google);
+    gmail.deliver({ id: 'm', from: 'news@example.com', labelIds: ['INBOX'] });
     // What unsubscribe() leaves behind when the process ends during the request.
     await insertPendingAction(
       db,

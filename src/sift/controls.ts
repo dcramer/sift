@@ -116,7 +116,7 @@ export async function buildControls(
     await live.ephemeral.set(key, value, COUNT_MS);
     return value;
   };
-  const gmail = async (db: Sql, email: string) => standIns?.gmail(email) ?? (await gmailFor(config, live.ephemeral, db, email));
+  const gmail = async (db: Sql, email: string) => await gmailFor(config, live.ephemeral, db, email);
   const chosen = async (db: Sql) => standIns?.model ?? (await openModel(config, live.ephemeral, db));
   /** The size of the person's own calls lately, in tokens, which is their mail and their labels more than the model; undefined for a typical call's. */
   const usualCall = async (db: Sql) => {
@@ -197,7 +197,8 @@ export async function buildControls(
         try {
           const { outcome, labels } = await press(deps, accountId, messageId, change);
           if (labels) await recordLabels(db, accountId, messageId, labels);
-          if (outcome.status === 'done') landed.push(outcome.actionId);
+          // A change whose answer was lost may have landed: Undo is offered, and settles it from Gmail first.
+          if (outcome.status === 'done' || outcome.status === 'unknown') landed.push(outcome.actionId);
           else if (outcome.status !== 'skipped') missed++;
         } catch (error) {
           reportError(error);
@@ -239,9 +240,10 @@ export async function buildControls(
     },
     putBack: async (db, accountId, messageId) => {
       const last = await lastStandingChange(db, accountId, messageId);
-      if (last) await undo({ db, mailbox: (await gmail(db, accountId)).mailbox }, last.id);
+      const outcome = last ? await undo({ db, mailbox: (await gmail(db, accountId)).mailbox }, last.id) : null;
       // The corrected decision is waiting to be carried out; do it now, not at the next interval.
       await passNow(db);
+      if (outcome?.status === 'failed' || outcome?.status === 'unknown') throw new Refusal(outcome.reason);
     },
     startEval: async (db, request) => {
       const tier = await openModelTier(config, live.ephemeral, db);

@@ -22,7 +22,7 @@ function dashboardAddresses(config: Config, port: number) {
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', 'localhost']);
 
-/** What a test host's preload offers in place of Gmail and the model (`StandIns`); nothing does otherwise. */
+/** What a test host's preload offers in place of the model (`StandIns`); nothing does otherwise. */
 const STAND_INS = Symbol.for('sift.stand-ins');
 
 /**

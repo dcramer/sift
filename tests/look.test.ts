@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { GmailApi, HistoryLabelChange, RawMessage } from '../src/gmail/api.ts';
 import type { Sql } from '../src/store/sql.ts';
 import type { Store } from '../src/store/store.ts';
 import { type Ephemeral, memoryEphemeral } from '../src/ephemeral/ephemeral.ts';
@@ -15,73 +14,41 @@ import { type RunOptions, type Work, dueWork } from '../src/work/run.ts';
 import { FILTER_CHECK_MINUTES } from '../src/work/filters.ts';
 import { passStatus, recordPassStatus } from '../src/work/status.ts';
 import type { Decision } from '../src/triage/types.ts';
-import { signInEnds, signedIn } from '../src/store/accounts.ts';
-import { onePerson, raw } from './fixtures.ts';
-import { ACCOUNT, DAY, FakeMailbox, rawMessage, storeExample, testModel, workDue } from './helpers.ts';
+import { recordSync, signInEnds, signedIn } from '../src/store/accounts.ts';
+import type { FakeGmail } from './google.ts';
+import { connectGmail, fakeGoogle, onePerson, raw } from './fixtures.ts';
+import { ACCOUNT, DAY, storeExample, testModel, workDue } from './helpers.ts';
 
 const MINUTE = 60_000;
+
+const fake = fakeGoogle();
 
 let store: Store;
 let db: Sql;
 let person: number;
-let mailbox: FakeMailbox;
+let gmail: FakeGmail;
+/** The sign-in Sift holds for the mailbox. */
+let token: string;
 let ephemeral: Ephemeral;
-/** Gmail's history id: it moves with every change to the mailbox, Sift's own among them. */
-let history: number;
-let arrived: { at: number; raw: RawMessage }[];
-let changed: { at: number; change: HistoryLabelChange }[];
 let clock: number;
-let asked: string[];
-let failing: boolean;
+/** How many requests Gmail had been asked when the test began asking. */
+let before: number;
 
-/** Gmail's history id now: each label change made since it was last read, Sift's or the person's, moves it on. */
-function historyNow(): number {
-  for (const change of mailbox.history.splice(0)) changed.push({ at: ++history, change });
-  return history;
-}
-
-function gmail(): GmailApi {
-  const reached = (call: string) => {
-    asked.push(call);
-    if (failing) throw new Error('invalid_grant');
-  };
-  return {
-    getProfile: async () => (reached('getProfile'), { emailAddress: ACCOUNT, historyId: String(historyNow()) }),
-    listHistory: async (start) => {
-      reached('listHistory');
-      const historyId = String(historyNow());
-      return {
-        additions: arrived.filter((a) => a.at > Number(start)).map((a) => ({ id: a.raw.id, labelIds: a.raw.labelIds })),
-        labelChanges: changed.filter((c) => c.at > Number(start)).map((c) => c.change),
-        historyId,
-      };
-    },
-    searchInbox: async () => ({ ids: arrived.map((a) => a.raw.id) }),
-    inboxSize: async () => arrived.length,
-    searchMail: async () => ({ ids: [] }),
-    mailboxSize: async () => 0,
-    getMessage: async () => null,
-    getMetadata: async (id) => arrived.find((a) => a.raw.id === id)?.raw ?? null,
-    getLabelIds: async (id) => mailbox.labels.get(id) ?? null,
-    listLabels: async () => [],
-    getThread: async () => null,
-    listSendAs: async () => [ACCOUNT],
-    getContent: async (id) => ({ text: `Body ${id}`, html: null, facts: { hasAttachments: false } }),
-  };
-}
+/** What Gmail was asked since `forget`, by the API's name for each method. */
+const asked = () => gmail.requests.slice(before).map((r) => r.method);
+const forget = () => void (before = gmail.requests.length);
+/** Google ends the sign-in Sift holds: Gmail refuses it until the person signs in again. */
+const signInEnded = () => fake.google.expire(token);
+const signInAgain = () => void (token = fake.google.grant(ACCOUNT));
 
 /** Mail reaching the inbox, dated `sent` (when Gmail received it, unless it was imported or inserted). */
 function arrive(id: string, from: string, sent = clock) {
-  historyNow();
-  history++;
-  const raw = rawMessage(id, { from, internalDate: sent });
-  arrived.push({ at: history, raw });
-  mailbox.labels.set(id, [...raw.labelIds]);
+  gmail.deliver({ id, from, to: ACCOUNT, text: `Body ${id}`, at: sent });
 }
 
 const options = (more: Partial<RunOptions> = {}): RunOptions => ({
   ephemeral,
-  connect: () => ({ api: gmail(), mailbox }),
+  connect: () => connectGmail(fake.google, ACCOUNT, { token }),
   log: () => {},
   now: () => clock,
   ...more,
@@ -108,25 +75,23 @@ const decision = (disposition: Decision['disposition']): Decision => ({ disposit
 beforeEach(async () => {
   ({ store, db } = await onePerson(ACCOUNT));
   person = (await raw(store.central).get<{ id: number }>('SELECT id FROM users'))!.id;
-  mailbox = new FakeMailbox();
   ephemeral = memoryEphemeral();
-  history = 1;
-  arrived = [];
-  changed = [];
   clock = 10 * DAY + 1000;
-  asked = [];
-  failing = false;
+  gmail = fake.google.mailbox(ACCOUNT);
+  gmail.now = () => clock;
+  signInAgain();
+  await recordSync(db, ACCOUNT, [], gmail.cursor(), clock - DAY);
   // Waiting for a model, which there is none of: no pass can do anything with it.
   arrive('news', 'News <news@example.com>');
   await workDue(store, options(), Infinity);
   expect(await raw(db).all('SELECT id FROM messages')).toEqual([{ id: 'news' }]);
-  asked = [];
+  forget();
 });
 
 describe('the timed tick', () => {
   it('begins no pass over a mailbox with nothing to do, asks Gmail only where its history is, and says when it looked', async () => {
     expect(await timedTickPasses()).toBe(false);
-    expect(asked).toEqual(['listHistory']);
+    expect(asked()).toEqual(['users.history.list']);
     expect(await passStatus(ephemeral, [ACCOUNT])).toMatchObject({ lastPassAt: clock, problems: [] });
   });
 
@@ -136,16 +101,16 @@ describe('the timed tick', () => {
   });
 
   it('begins none while the Google sign-in has expired, and says so, then one once Gmail answers again', async () => {
-    failing = true;
+    signInEnded();
     expect(await timedTickPasses()).toBe(false);
     expect(await passStatus(ephemeral, [ACCOUNT])).toMatchObject({ problems: [`${ACCOUNT}: invalid_grant`], expired: [ACCOUNT] });
     expect(await timedTickPasses()).toBe(false);
-    failing = false;
+    signInAgain();
     expect(await timedTickPasses()).toBe(true);
   });
 
   it('learns from a sign-in Google ended a week after it was given that the next ends a week on too, and forgets it once one outlives the week', async () => {
-    failing = true;
+    signInEnded();
     await signedIn(db, ACCOUNT, clock - 3 * DAY);
     // Ended sooner: revoked, or its password changed, which says nothing about the next.
     await timedTickPasses();
@@ -158,7 +123,7 @@ describe('the timed tick', () => {
     expect(await signInEnds(db)).toEqual(new Map([[ACCOUNT, clock + 7 * DAY]]));
 
     // Published since: Gmail still answers a day past the week.
-    failing = false;
+    signInAgain();
     clock += 8 * DAY;
     await timedTickPasses();
     expect(await signInEnds(db)).toEqual(new Map());
@@ -180,7 +145,7 @@ describe('the timed tick', () => {
     expect(await timedTickPasses()).toBe(true);
     ephemeral = memoryEphemeral();
     expect(await timedTickPasses()).toBe(true);
-    expect(asked).toEqual([]);
+    expect(asked()).toEqual([]);
   });
 
   it('begins one on the first tick of a day, which reads the mailbox’s other addresses again', async () => {
@@ -279,11 +244,11 @@ describe('the timed tick', () => {
     it('counts a look that failed as a look, and begins none until the next is due', async () => {
       await setRuleFilter(db, await filtered(), ACCOUNT, { filterId: 'f1', state: 'active', written: null }, clock);
       clock += FILTER_CHECK_MINUTES * MINUTE;
-      mailbox.failFilters = true;
+      gmail.fail('users.settings.filters.list', { status: 403, reason: 'rateLimitExceeded' });
       const logged: string[] = [];
       expect(await timedTickPasses()).toBe(true);
       await workDue(store, options({ log: (line) => logged.push(line) }), Infinity);
-      expect(logged).toContain(`${ACCOUNT}: could not check Gmail filters: network down`);
+      expect(logged).toContain(`${ACCOUNT}: could not check Gmail filters: rateLimitExceeded`);
       expect(await timedTickPasses()).toBe(false);
       clock += FILTER_CHECK_MINUTES * MINUTE;
       expect(await timedTickPasses()).toBe(true);
@@ -306,18 +271,18 @@ describe('Sift’s own changes to the mailbox', () => {
     await recordDecision(db, ACCOUNT, 'news', decision('archive'), { carryOut: true, now: clock });
     expect(await timedTickPasses()).toBe(true);
     await workDue(store, options(), Infinity);
-    expect(mailbox.labels.get('news')).not.toContain('INBOX');
+    expect(gmail.message('news')!.labelIds).not.toContain('INBOX');
   }
 
   it('begin no other pass', async () => {
     await siftArchives();
     expect(await timedTickPasses()).toBe(false);
-    expect(asked).toContain('listHistory');
+    expect(asked()).toContain('users.history.list');
   });
 
   it('do not hide a change the person made to the same mail in Gmail after', async () => {
     await siftArchives();
-    mailbox.byUser('news', { add: ['INBOX'] });
+    gmail.change('news', { add: ['INBOX'] });
     expect(await timedTickPasses()).toBe(true);
   });
 
@@ -332,9 +297,9 @@ describe('the gap between looks at Gmail', () => {
   /** Minutes from now until the timed tick next asks Gmail, ticking once a minute; past a quarter hour, null. */
   async function minutesToLook(): Promise<number | null> {
     for (let minute = 1; minute <= 15; minute++) {
-      asked = [];
+      forget();
       await timedTickPasses();
-      if (asked.includes('listHistory')) return minute;
+      if (asked().includes('users.history.list')) return minute;
     }
     return null;
   }
@@ -377,18 +342,19 @@ describe('the gap between looks at Gmail', () => {
     // Something for the pass to fetch after it has read Gmail: the fetch takes four minutes, and mail comes as it begins.
     await db.insert(examples).values({ accountId: ACCOUNT, messageId: 'news', markedAt: clock });
     let came: number | null = null;
-    const slow = (): GmailApi => ({
-      ...gmail(),
-      getContent: async (id) => {
+    const slow = () => {
+      const reach = connectGmail(fake.google, ACCOUNT, { token });
+      const getContent = async (id: string) => {
         if (came === null) {
           came = clock;
           arrive('ada', 'Ada <ada@example.org>');
           clock += 4 * MINUTE;
         }
-        return await gmail().getContent(id);
-      },
-    });
-    await workDue(store, options({ connect: () => ({ api: slow(), mailbox }) }), Infinity, [person]);
+        return await reach.api.getContent(id);
+      };
+      return { ...reach, api: { ...reach.api, getContent } };
+    };
+    await workDue(store, options({ connect: slow }), Infinity, [person]);
     expect(came).not.toBeNull();
     while (!(await timedTickPasses())) expect(clock - came!).toBeLessThan(15 * MINUTE);
     expect(clock - came!).toBeLessThanOrEqual(10 * MINUTE);
@@ -410,9 +376,9 @@ describe('the gap between looks at Gmail', () => {
 
   it('does not hold back a person’s press', async () => {
     await quiet();
-    asked = [];
+    forget();
     expect((await dueWork(store, options(), [person])).filter((piece) => piece.kind === 'pass')).toHaveLength(1);
-    expect(asked).toEqual([]);
+    expect(asked()).toEqual([]);
   });
 });
 
@@ -421,7 +387,7 @@ describe('going through an inbox, applying a rule to it, and a test run', () => 
     await startInboxRuns(db, [ACCOUNT], { acts: false, most: 10, now: clock });
     expect(await timedTickBegins('inbox')).toBe(false);
     expect(await timedTickBegins('inbox', { model: unsure })).toBe(true);
-    failing = true;
+    signInEnded();
     expect(await timedTickPasses()).toBe(false);
     expect(await timedTickBegins('inbox', { model: unsure })).toBe(false);
   });
@@ -440,7 +406,7 @@ describe('going through an inbox, applying a rule to it, and a test run', () => 
     const applying = (await goingInboxRuns(db)).find((run) => run.ruleId === ruleId)!.id;
     expect(await timedTickSlices()).toEqual([applying]);
     expect(await timedTickSlices({ model: unsure })).toHaveLength(2);
-    failing = true;
+    signInEnded();
     expect(await timedTickPasses()).toBe(false);
     expect(await timedTickSlices({ model: unsure })).toEqual([]);
   });
@@ -453,7 +419,7 @@ describe('going through an inbox, applying a rule to it, and a test run', () => 
     expect(await raw(db).all('SELECT message_id, carry_out, by_user FROM decisions')).toEqual([{ message_id: 'news', carry_out: true, by_user: true }]);
     expect(await timedTickPasses()).toBe(true);
     await workDue(store, options(), Infinity);
-    expect(mailbox.labels.get('news')).not.toContain('INBOX');
+    expect(gmail.message('news')!.labelIds).not.toContain('INBOX');
     expect(await timedTickPasses()).toBe(false);
   });
 
@@ -467,5 +433,5 @@ describe('going through an inbox, applying a rule to it, and a test run', () => 
 
 it('a person’s own press begins their pass without looking', async () => {
   expect((await dueWork(store, options(), [person])).filter((piece) => piece.kind === 'pass')).toHaveLength(1);
-  expect(asked).toEqual([]);
+  expect(asked()).toEqual([]);
 });

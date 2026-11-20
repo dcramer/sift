@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { GmailApi } from '../src/gmail/api.ts';
 import { memoryEphemeral } from '../src/ephemeral/ephemeral.ts';
 import { recordSync } from '../src/store/accounts.ts';
 import { recordDecision } from '../src/store/decisions.ts';
@@ -12,27 +11,41 @@ import { copyMail, copyQuery } from '../src/work/copy.ts';
 import { pruneOld } from '../src/work/retention.ts';
 import { type RunOptions, dueWork, runOnce } from '../src/work/run.ts';
 import { syncAccount, syncWants } from '../src/work/sync.ts';
-import { firstAccount, onePerson, raw } from './fixtures.ts';
-import { ACCOUNT, DAY, FakeMailbox, type HeldMail, facts, gmailOf, rawMessage, testModel } from './helpers.ts';
+import type { Mail } from './google.ts';
+import { connectGmail, fakeGoogle, firstAccount, onePerson, raw } from './fixtures.ts';
+import { ACCOUNT, DAY, facts, testModel } from './helpers.ts';
 
 const NOW = 2000 * DAY;
 const YEAR = 365 * DAY;
 
+const fake = fakeGoogle();
+
 let store: Store;
 let db: Sql;
+let gmail: ReturnType<typeof connectGmail>;
 
-const archived = (id: string, at: number, labelIds = ['CATEGORY_UPDATES']): HeldMail => rawMessage(id, { labelIds, internalDate: at });
+const archived = (id: string, at: number, labelIds = ['CATEGORY_UPDATES']): Mail => ({ id, from: 'News <news@example.com>', to: ACCOUNT, labelIds, at });
+const inInbox = (id: string, at: number): Mail => ({ id, from: 'News <news@example.com>', to: ACCOUNT, at });
+/** Mail from before Inbox was on, found only by a search. */
+const deliver = (mail: Mail[]) => {
+  for (const m of mail) gmail.gmail.deliver(m, { quietly: true });
+};
+/** Each read of a message, as `<format>:<id>`. */
+const reads = () => gmail.gmail.asked('users.messages.get').map((r) => `${r.format}:${r.id}`);
+const pages = () => gmail.gmail.asked('users.messages.list').map((r) => r.pageToken ?? '');
+/** Where Gmail's history is now, as signing in leaves the sync cursor. */
+
 const ids = async (table: string, column = 'message_id') =>
   (await raw(db).all<{ id: string }>(`SELECT ${column} AS id FROM ${table} ORDER BY 1`)).map((r) => r.id);
 const copies = async () =>
   await raw(db).all<{ account_id: string; since: number | null; before: number; finished: boolean }>(
     'SELECT account_id, since, before, finished_at IS NOT NULL AS finished FROM mail_copies ORDER BY account_id',
   );
-const copy = (api: Pick<GmailApi, 'searchMail' | 'getMessage' | 'getContent'>, more: { until?: number; now?: () => number } = {}) =>
-  copyMail({ db, api, now: () => NOW, ...more }, ACCOUNT);
+const copy = (api = gmail.api, more: { until?: number; now?: () => number } = {}) => copyMail({ db, api, now: () => NOW, ...more }, ACCOUNT);
 
 beforeEach(async () => {
   ({ store, db } = await onePerson(ACCOUNT));
+  gmail = connectGmail(fake.google);
 });
 
 describe('copying a mailbox for Inbox', () => {
@@ -44,57 +57,58 @@ describe('copying a mailbox for Inbox', () => {
     expect(copyQuery({ since: null, before: NOW })).toBe(`before:${NOW / 1000 + 1} -in:drafts -in:chats`);
   });
 
-  it('records each message newest first, a page at a time, with its text, and triages none of it', async () => {
+  it('records each message newest first, a page at a time, with its text from one read, none gone to Spam since it was listed, and triages none of it', async () => {
     await setMail(db, true, { now: NOW });
     const mail = Array.from({ length: 150 }, (_, i) => archived(`m${String(i).padStart(3, '0')}`, NOW - (i + 1) * 60_000));
-    const api = gmailOf([...mail, archived('junk', NOW - 1000, ['SPAM']), archived('draft', NOW - 2000, ['DRAFT'])]);
-    expect(await copy(api)).toBe(152);
-    expect(api.calls.filter((c) => c.startsWith('list:'))).toEqual(['list:', 'list:100']);
-    expect(api.calls.filter((c) => c.startsWith('whole:'))).toHaveLength(152);
-    expect(api.calls.some((c) => c.startsWith('meta:') || c.startsWith('text:'))).toBe(false);
+    deliver([...mail, archived('junk', NOW - 200 * 60_000), archived('draft', NOW - 2000, ['DRAFT'])]);
+    gmail.gmail.meanwhile('users.messages.list', () => {});
+    gmail.gmail.meanwhile('users.messages.list', () => gmail.gmail.change('junk', { add: ['SPAM'] }));
+    expect(await copy()).toBe(151);
+    expect(pages()).toEqual(['', '100']);
+    expect(reads().toSorted()).toEqual(['full:junk', ...mail.map((m) => `full:${m.id}`)]);
     expect(await ids('mail_bodies')).toEqual(mail.map((m) => m.id));
     expect(await ids('messages', 'id')).toEqual(mail.map((m) => m.id));
     expect(await listUndecided(db, ACCOUNT, 500)).toEqual([]);
     expect(await copies()).toMatchObject([{ finished: true }]);
-    expect(await copy(api)).toBeNull();
+    expect(await copy()).toBeNull();
   });
 
   it('stops at its limit and goes on where it left off, reading no message twice', async () => {
     await setMail(db, true, { now: NOW });
     let clock = NOW;
-    const held = gmailOf(Array.from({ length: 120 }, (_, i) => archived(`m${String(i).padStart(3, '0')}`, NOW - (i + 1) * 60_000)));
-    const api = { ...held, getMessage: async (id: string) => ((clock += 1000), await held.getMessage(id)) };
+    deliver(Array.from({ length: 120 }, (_, i) => archived(`m${String(i).padStart(3, '0')}`, NOW - (i + 1) * 60_000)));
+    const api = { ...gmail.api, getMessage: async (id: string) => ((clock += 1000), await gmail.api.getMessage(id)) };
     expect(await copy(api, { until: NOW + 30_000, now: () => clock })).toBe(30);
     expect(await copy(api, { now: () => clock })).toBe(90);
-    const reads = held.calls.filter((c) => c.startsWith('whole:'));
-    expect(new Set(reads).size).toBe(120);
-    expect(reads).toHaveLength(120);
-    expect(held.calls.filter((c) => c.startsWith('list:'))).toEqual(['list:', 'list:', 'list:100']);
+    expect(new Set(reads()).size).toBe(120);
+    expect(reads()).toHaveLength(120);
+    expect(reads().every((r) => r.startsWith('full:'))).toBe(true);
+    expect(pages()).toEqual(['', '', '100']);
     expect(await ids('mail_bodies')).toHaveLength(120);
   });
 
   it('leaves recorded inbox mail to the pass, and reads only the text of other recorded mail', async () => {
     await recordSync(db, ACCOUNT, [facts({ messageId: 'in' }), facts({ messageId: 'out', labelIds: [] })], '1', NOW);
     await setMail(db, true, { now: NOW });
-    const api = gmailOf([rawMessage('in', { internalDate: NOW - 1000 }), archived('out', NOW - 2000)]);
-    await copy(api);
-    expect(api.calls).toEqual(['list:', 'text:out']);
+    deliver([inInbox('in', NOW - 1000), archived('out', NOW - 2000)]);
+    await copy();
+    expect(gmail.gmail.requests.map((r) => `${r.method}:${r.format ?? ''}:${r.id ?? ''}`)).toEqual(['users.messages.list::', 'users.messages.get:full:out']);
     expect(await ids('mail_bodies')).toEqual(['out']);
   });
 
   it('turned off part-way, writes nothing after, and what it kept goes', async () => {
     await setMail(db, true, { now: NOW });
-    const held = gmailOf(Array.from({ length: 5 }, (_, i) => archived(`m${i}`, NOW - (i + 1) * 60_000)));
-    let reads = 0;
+    deliver(Array.from({ length: 5 }, (_, i) => archived(`m${i}`, NOW - (i + 1) * 60_000)));
+    let read = 0;
     const api = {
-      ...held,
+      ...gmail.api,
       getMessage: async (id: string) => {
-        if (++reads === 3) await setMail(db, false);
-        return await held.getMessage(id);
+        if (++read === 3) await setMail(db, false);
+        return await gmail.api.getMessage(id);
       },
     };
     await copy(api);
-    expect(reads).toBe(3);
+    expect(read).toBe(3);
     expect(await ids('messages', 'id')).toEqual(['m0', 'm1']);
     expect(await ids('mail_bodies')).toEqual([]);
     expect(await copies()).toEqual([]);
@@ -104,7 +118,7 @@ describe('copying a mailbox for Inbox', () => {
     ({ store, db } = await onePerson(ACCOUNT, 'me@work.example.org'));
     const options: RunOptions = {
       ephemeral: memoryEphemeral(),
-      connect: () => ({ api: gmailOf([]), mailbox: new FakeMailbox() }),
+      connect: (_db, account) => connectGmail(fake.google, account.id),
       log: () => {},
       now: () => NOW,
     };
@@ -121,11 +135,12 @@ describe('copying a mailbox for Inbox', () => {
 describe('Inbox’s window', () => {
   it('widened, copies what it adds; narrowed, lets go of the text and then the records outside it, but not the inbox', async () => {
     await setMail(db, true, { now: NOW, window: 'year' });
-    await copy(gmailOf([]));
+    await copy();
     await setMail(db, true, { now: NOW, window: 'three_years' });
     expect(await copies()).toEqual([{ account_id: ACCOUNT, since: NOW - 3 * YEAR, before: NOW - YEAR, finished: false }]);
     const old = NOW - 2 * YEAR;
-    await copy(gmailOf([archived('old-out', old), rawMessage('old-in', { internalDate: old })]));
+    deliver([archived('old-out', old), inInbox('old-in', old)]);
+    await copy();
     expect(await ids('mail_bodies')).toEqual(['old-in', 'old-out']);
 
     await setMail(db, true, { now: NOW, window: 'year' });
@@ -176,50 +191,53 @@ describe('retention while Inbox is on', () => {
 });
 
 describe('sync while Inbox is on', () => {
-  const added = () => [
-    { id: 'new', labelIds: ['INBOX', 'UNREAD'] },
-    { id: 'sent', labelIds: ['SENT'] },
-    { id: 'filtered', labelIds: ['CATEGORY_PROMOTIONS'] },
-    { id: 'draft', labelIds: ['DRAFT'] },
-  ];
-  const mail = () => added().map((a) => rawMessage(a.id, { labelIds: a.labelIds, internalDate: NOW, ...(a.id === 'sent' ? { from: ACCOUNT } : {}) }));
+  const arrive = async () => {
+    await recordSync(db, ACCOUNT, [], gmail.gmail.cursor(), NOW - DAY);
+    for (const [id, labelIds] of [
+      ['new', ['INBOX', 'UNREAD']],
+      ['sent', ['SENT']],
+      ['filtered', ['CATEGORY_PROMOTIONS']],
+      ['draft', ['DRAFT']],
+    ] as const)
+      gmail.gmail.deliver({ id, from: id === 'sent' ? ACCOUNT : 'News <news@example.com>', to: ACCOUNT, labelIds: [...labelIds], at: NOW });
+  };
 
   it('records what arrived elsewhere and what the person sent, and the inbox’s, each with its text from one read, and triages only the inbox’s', async () => {
     await setMail(db, true, { now: NOW });
-    const api = gmailOf(mail(), added());
-    expect(await syncWants(db, gmailOf(mail(), added()), await firstAccount(db))).toBe(true);
-    const report = await syncAccount(db, api, await firstAccount(db), () => NOW);
+    await arrive();
+    expect(await syncWants(db, gmail.api, await firstAccount(db))).toBe(true);
+    const report = await syncAccount(db, gmail.api, await firstAccount(db), () => NOW);
     expect(report.kept).toBe(2);
     expect(await ids('messages', 'id')).toEqual(['filtered', 'new', 'sent']);
     expect(await ids('mail_bodies')).toEqual(['filtered', 'new', 'sent']);
-    expect(api.calls.toSorted()).toEqual(['whole:filtered', 'whole:new', 'whole:sent']);
+    expect(reads().toSorted()).toEqual(['full:filtered', 'full:new', 'full:sent']);
     expect((await listUndecided(db, ACCOUNT, 10)).map((m) => m.facts.messageId)).toEqual(['new']);
   });
 
   it('records only the inbox’s while it is off', async () => {
-    const api = gmailOf(mail(), added());
-    await syncAccount(db, api, await firstAccount(db), () => NOW);
+    await arrive();
+    await syncAccount(db, gmail.api, await firstAccount(db), () => NOW);
     expect(await ids('messages', 'id')).toEqual(['new']);
-    expect(api.calls).toEqual(['meta:new']);
+    expect(reads()).toEqual(['metadata:new']);
   });
 });
 
 describe('the model', () => {
   it('reads the text Inbox holds instead of Gmail', async () => {
     await setMail(db, true, { now: NOW });
-    await recordSync(db, ACCOUNT, [facts({ messageId: 'held' })], '1', NOW);
+    deliver([inInbox('held', NOW)]);
+    await recordSync(db, ACCOUNT, [facts({ messageId: 'held' })], gmail.gmail.cursor(), NOW);
     await keepText(db, ACCOUNT, 'held', { text: 'What Inbox holds.', html: null, read: { hasAttachments: true } }, NOW);
-    const api = gmailOf([rawMessage('held')]);
     const bodies: (string | null)[] = [];
     const judge = testModel(async ({ evidence }) => (bodies.push(evidence.body), { label: 'unsure', reason: 'r', confidence: 0.2 }));
     await runOnce(db, {
       ephemeral: memoryEphemeral(),
-      connect: () => ({ api, mailbox: new FakeMailbox() }),
+      connect: () => gmail,
       log: () => {},
       now: () => NOW,
       model: async () => judge,
     });
     expect(bodies).toEqual(['What Inbox holds.']);
-    expect(api.calls.filter((c) => c === 'text:held' || c === 'whole:held')).toEqual([]);
+    expect(reads().filter((r) => r === 'full:held')).toEqual([]);
   });
 });

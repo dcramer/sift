@@ -56,7 +56,7 @@ test.describe('Removing a mailbox', () => {
     await settings(page).getByRole('button', { name: 'Remove me@example.org' }).click();
     await expect(page.getByRole('dialog', { name: 'Remove me@example.org' })).toContainText('You are signed in as it, so you will be signed out.');
     await confirmRemoval(page, 'Remove me@example.org', 'me@example.org', 'Remove mailbox');
-    await expect(page.getByText('No Google client yet.')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Sign in with Google' })).toBeVisible();
     expect((await page.request.get('/api/manage', { headers: { 'x-sift': '1' } })).status()).toBe(401);
   });
 });
@@ -111,7 +111,7 @@ test.describe('Deleting the account', () => {
     await expect(page.getByRole('dialog', { name: 'Delete your account' }).getByRole('button', { name: 'Delete everything' })).toBeDisabled();
     await confirmRemoval(page, 'Delete your account', 'me@example.org', 'Delete everything');
 
-    await expect(page.getByText('No Google client yet.')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Sign in with Google' })).toBeVisible();
     expect((await page.request.get('/api/manage', { headers: { 'x-sift': '1' } })).status()).toBe(401);
   });
 
@@ -127,7 +127,7 @@ test.describe('Deleting the account', () => {
     });
     page.on('framenavigated', (frame) => void (frame === page.mainFrame() && (deleted = false)));
     await confirmRemoval(page, 'Delete your account', 'me@example.org', 'Delete everything');
-    await expect(page.getByText('No Google client yet.')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Sign in with Google' })).toBeVisible();
     expect(asked).toEqual([]);
   });
 });

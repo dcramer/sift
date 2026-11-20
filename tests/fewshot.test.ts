@@ -2,7 +2,7 @@ import type { Sql } from '../src/store/sql.ts';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { triageAccount } from '../src/work/triage.ts';
 import { recordSync } from '../src/store/accounts.ts';
-import { firstAccount, openUserDb, raw } from './fixtures.ts';
+import { connectGmail, fakeGoogle, firstAccount, openUserDb, raw } from './fixtures.ts';
 import { examplesFor } from '../src/store/examples.ts';
 import { deriveFacts, factLine } from '../src/triage/facts.ts';
 import {
@@ -18,7 +18,9 @@ import {
 } from '../src/triage/fewshot.ts';
 import { buildPrompt } from '../src/triage/prompt.ts';
 import { type JudgeInput, modelStage } from '../src/triage/stages/model.ts';
-import { ACCOUNT, FakeMailbox, facts, storeExample, SAMPLE_LABELS, testModel } from './helpers.ts';
+import { ACCOUNT, facts, storeExample, SAMPLE_LABELS, testModel } from './helpers.ts';
+
+const fake = fakeGoogle();
 
 const shot = (messageId: string, from: string, labelId: string, markedAt: number, extra: Partial<Shot> = {}): Shot => ({
   messageId,
@@ -345,10 +347,8 @@ describe('stored examples', () => {
       seen.push(input);
       return { label: 'newsletter', reason: 'r' };
     });
-    const sources = {
-      api: { getContent: async () => ({ text: 'text', html: null, facts: { hasAttachments: false } }), getThread: async () => null },
-      mailbox: new FakeMailbox(),
-    };
+    const sources = connectGmail(fake.google);
+    sources.gmail.deliver({ id: 'new1', from: 'news@example.com', text: 'text' });
     await recordSync(db, ACCOUNT, [facts({ messageId: 'new1' })], '3');
     await triageAccount({ db, mailbox: null, model, sources }, await firstAccount(db));
 

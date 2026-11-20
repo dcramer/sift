@@ -17,12 +17,14 @@ import { MAX_ATTEMPTS, startRun } from '../src/store/runs.ts';
 import { addRule, listRules, setRule } from '../src/store/rules.ts';
 import { redecideWaiting } from '../src/learn/redecide.ts';
 import type { Decision, Disposition } from '../src/triage/types.ts';
-import { ACCOUNT, DAY, everything, facts, FakeMailbox, quietSources, testModel } from './helpers.ts';
-import { firstAccount, raw, startDashboard, onePerson, withReason } from './fixtures.ts';
+import { ACCOUNT, DAY, everything, facts, testModel } from './helpers.ts';
+import { connectGmail, fakeGoogle, firstAccount, raw, startDashboard, onePerson, withReason } from './fixtures.ts';
 import type { Store } from '../src/store/store.ts';
 
+const fake = fakeGoogle();
 let db: Sql;
 let store: Store;
+let gmail: ReturnType<typeof connectGmail>;
 let serial = 0;
 
 /** Record a message from `address` and what sift would do with it, as a suggestion. */
@@ -40,8 +42,17 @@ async function answerEach(sender: string, label: string, now = Date.now()): Prom
 
 beforeEach(async () => {
   ({ store, db } = await onePerson(ACCOUNT));
+  gmail = connectGmail(fake.google);
   serial = 0;
 });
+
+/** Mail in the inbox, as Gmail holds it. */
+const inGmail = (...ids: string[]) => {
+  for (const id of ids) gmail.gmail.deliver({ id, from: 'news@example.com', labelIds: ['INBOX'] });
+};
+const labelsOf = (id: string) => gmail.gmail.message(id)!.labelIds;
+/** Each message Gmail was asked for, in order. */
+const fetched = () => gmail.gmail.asked('users.messages.get').flatMap((r) => r.id ?? []);
 
 describe('leaving mail in the inbox', () => {
   it('is what the owner said of that sender afterwards, and moves nothing out', async () => {
@@ -239,12 +250,10 @@ describe('an answer pressed in the dashboard', () => {
     expect(result).toMatchObject({ carrying: 1 });
     expect(await ruleFor('news@example.com')).toEqual([]);
 
-    const mailbox = new FakeMailbox();
-    mailbox.labels.set('m1', ['INBOX']);
-    mailbox.labels.set('left', ['INBOX']);
-    await triageAccount({ db, mailbox: null, answers: mailbox }, await firstAccount(db));
-    expect(mailbox.labels.get('m1')).not.toContain('INBOX');
-    expect(mailbox.labels.get('left')).toEqual(['INBOX']);
+    inGmail('m1', 'left');
+    await triageAccount({ db, mailbox: null, answers: gmail.mailbox }, await firstAccount(db));
+    expect(labelsOf('m1')).not.toContain('INBOX');
+    expect(labelsOf('left')).toEqual(['INBOX']);
     expect(await raw(db).get(`SELECT by_user, carry_out, outcome FROM decisions WHERE message_id = 'm1' ORDER BY id DESC LIMIT 1`)).toEqual({
       by_user: true,
       carry_out: true,
@@ -275,10 +284,9 @@ describe('an answer pressed in the dashboard', () => {
     });
     expect(await accuracy(db)).toMatchObject({ reviewed: 0 });
 
-    const mailbox = new FakeMailbox();
-    mailbox.labels.set('stuck', ['INBOX']);
-    await triageAccount({ db, mailbox: null, answers: mailbox }, await firstAccount(db));
-    expect(mailbox.labels.get('stuck')).not.toContain('INBOX');
+    inGmail('stuck');
+    await triageAccount({ db, mailbox: null, answers: gmail.mailbox }, await firstAccount(db));
+    expect(labelsOf('stuck')).not.toContain('INBOX');
   });
 
   it('answers that go with the label propose no rule: one would do what already happens', async () => {
@@ -307,10 +315,9 @@ describe('an answer pressed in the dashboard', () => {
     ).toEqual({ disposition: 'keep', subscription: 'preserve', label_id: 'newsletter', by_user: true, reason: 'you said this is Newsletters, and to keep it' });
     expect(await raw(db).get(`SELECT verdict, disposition, label_id FROM feedback`)).toEqual({ verdict: 'right', disposition: 'keep', label_id: 'newsletter' });
 
-    const mailbox = new FakeMailbox();
-    mailbox.labels.set('m1', ['INBOX']);
-    await triageAccount({ db, mailbox: null, answers: mailbox }, await firstAccount(db));
-    expect(mailbox.labels.get('m1')).toContain('INBOX');
+    inGmail('m1');
+    await triageAccount({ db, mailbox: null, answers: gmail.mailbox }, await firstAccount(db));
+    expect(labelsOf('m1')).toContain('INBOX');
   });
 
   it('keeps the message a "when it is this label, keep" rule was made from, as the panel does after adding it', async () => {
@@ -520,10 +527,9 @@ describe('reading a suggestion', () => {
     await suggest('ada@example.org', 'review'); // m2
     await suggest('kept@example.com', 'keep', { labelId: 'personal' }); // m3
     await suggest('gone@example.com', 'archive', NEWS); // m4
-    const fetched: string[] = [];
-    const content = (id: string) => ({ text: `Text of ${id}`, html: id === 'm1' ? `<p>Text of ${id}</p>` : null, facts: { hasAttachments: false } });
-    const api = { getContent: async (id: string) => (fetched.push(id), id === 'm4' ? null : content(id)) };
-    const reader = () => readingOnce(db, ACCOUNT, api, () => 1000);
+    gmail.gmail.deliver({ id: 'm1', from: 'news@example.com', text: 'Text of m1', html: '<p>Text of m1</p>' });
+    for (const id of ['m2', 'm3']) gmail.gmail.deliver({ id, from: 'news@example.com', text: `Text of ${id}` });
+    const reader = () => readingOnce(db, ACCOUNT, gmail.api, () => 1000);
     const stored = async () => await raw(db).all('SELECT message_id, body_text, body_html FROM read_bodies ORDER BY message_id');
 
     expect(await keepWaitingText(db, reader(), ACCOUNT, () => 1000)).toBe(3);
@@ -533,7 +539,7 @@ describe('reading a suggestion', () => {
       { message_id: 'm4', body_text: 'sift-plain:', body_html: null },
     ]);
     expect(await keepWaitingText(db, reader(), ACCOUNT, () => 1000)).toBe(0);
-    expect(fetched.toSorted()).toEqual(['m1', 'm2', 'm4']);
+    expect(fetched().toSorted()).toEqual(['m1', 'm2', 'm4']);
     expect(await messageDetail(db, await everything(db), 'm1')).toMatchObject({ body: 'Text of m1', hasHtml: true });
     expect(await messageDetail(db, await everything(db), 'm2')).toMatchObject({ body: 'Text of m2', hasHtml: false });
     expect(await messageDetail(db, await everything(db), 'm3')).toMatchObject({ body: null, hasHtml: false });
@@ -550,7 +556,7 @@ describe('reading a suggestion', () => {
     expect(await purgeRead(db, 1000 - 1)).toBe(0);
     expect(await purgeRead(db, 1000 + 1)).toBe(3);
     expect(await keepWaitingText(db, reader(), ACCOUNT, () => 1000 + READ_KEEP_DAYS * DAY)).toBe(0);
-    expect(fetched).toHaveLength(3);
+    expect(fetched()).toHaveLength(3);
   });
 
   it("shows one sender's waiting mail, in every mailbox, newest first", async () => {
@@ -580,32 +586,26 @@ describe('examples', () => {
 
   it('keeps an answer without the text once Sift has let it go, rather than read Gmail again', async () => {
     await suggest('news@example.com', 'archive', NEWS); // m1
-    const fetched: string[] = [];
-    const api = { getContent: async (id: string) => (fetched.push(id), { text: `Text of ${id}`, html: null, facts: { hasAttachments: false } }) };
+    inGmail('m1');
     await keepWaitingText(
       db,
-      readingOnce(db, ACCOUNT, api, () => 1000),
+      readingOnce(db, ACCOUNT, gmail.api, () => 1000),
       ACCOUNT,
       () => 1000,
     );
     await purgeRead(db, 1000 + READ_KEEP_DAYS * DAY);
     await answerEach('news@example.com', 'newsletter', 50);
-    expect(await captureExamples(db, readingOnce(db, ACCOUNT, api), ACCOUNT)).toBe(0);
-    expect(fetched).toEqual(['m1']);
+    expect(await captureExamples(db, readingOnce(db, ACCOUNT, gmail.api), ACCOUNT)).toBe(0);
+    expect(fetched()).toEqual(['m1']);
     expect(await raw(db).get(`SELECT status, body_text FROM examples WHERE message_id = 'm1'`)).toEqual({ status: 'gone', body_text: null });
   });
 
   it('takes the text Sift read, and reads only what it never read', async () => {
     await suggest('news@example.com', 'archive', NEWS); // m1: kept
     await suggest('news@example.com', 'archive', NEWS); // m2: gone from Gmail when its text was fetched
-    await keepWaitingText(
-      db,
-      readingOnce(db, ACCOUNT, {
-        getContent: async (id) => (id === 'm2' ? null : { text: `Text of ${id}`, html: `<p>${id}</p>`, facts: { hasAttachments: false } }),
-      }),
-      ACCOUNT,
-      () => 1000,
-    );
+    gmail.gmail.deliver({ id: 'm1', from: 'news@example.com', text: 'Text of m1', html: '<p>m1</p>' });
+    gmail.gmail.deliver({ id: 'm3', from: 'news@example.com', text: 'Hi' });
+    await keepWaitingText(db, readingOnce(db, ACCOUNT, gmail.api), ACCOUNT, () => 1000);
     await suggest('news@example.com', 'archive', NEWS); // m3: not kept yet
     await answerEach('news@example.com', 'newsletter', 50);
     expect(await raw(db).all('SELECT message_id, status, body_text, body_html FROM examples ORDER BY message_id')).toEqual([
@@ -614,14 +614,10 @@ describe('examples', () => {
       { message_id: 'm3', status: 'pending', body_text: null, body_html: null },
     ]);
 
-    const fetched: string[] = [];
-    await captureExamples(
-      db,
-      { getContent: async (id) => (fetched.push(id), id === 'm2' ? null : { text: 'Hi', html: null, facts: { hasAttachments: false } }) },
-      ACCOUNT,
-    );
+    const before = fetched().length;
+    await captureExamples(db, gmail.api, ACCOUNT);
     // m2 was read once and had gone; only m3 was never read.
-    expect(fetched).toEqual(['m3']);
+    expect(fetched().slice(before)).toEqual(['m3']);
     expect(await raw(db).get(`SELECT status FROM examples WHERE message_id = 'm2'`)).toEqual({ status: 'gone' });
   });
 
@@ -631,14 +627,11 @@ describe('examples', () => {
     await suggest('news@example.com', 'archive', NEWS);
     await answerEach('news@example.com', 'newsletter');
 
-    let failing = true;
-    const api = {
-      getContent: async (id: string) => {
-        if (id === 'm3' && failing) throw new Error('network');
-        return id === 'm2' ? null : { text: 'Hello there.', html: '<p>Hello there.</p>', facts: { hasAttachments: false } };
-      },
-    };
-    await expect(captureExamples(db, api, ACCOUNT)).rejects.toThrow('network');
+    for (const id of ['m1', 'm3']) gmail.gmail.deliver({ id, from: 'news@example.com', text: 'Hello there.', html: '<p>Hello there.</p>' });
+    gmail.gmail.failLater('users.messages.get', 2, { status: 403, reason: 'userRateLimitExceeded' });
+    const { api } = gmail;
+    await expect(captureExamples(db, api, ACCOUNT)).rejects.toMatchObject({ status: 403 });
+    expect(fetched()).toEqual(['m1', 'm2', 'm3']);
     const stored = await raw(db).all('SELECT message_id, status, body_text, body_html FROM examples ORDER BY message_id');
     expect(stored).toEqual([
       { message_id: 'm1', status: 'captured', body_text: 'sift-plain:Hello there.', body_html: 'sift-plain:<p>Hello there.</p>' },
@@ -646,7 +639,6 @@ describe('examples', () => {
       { message_id: 'm3', status: 'pending', body_text: null, body_html: null },
     ]);
 
-    failing = false;
     expect(await captureExamples(db, api, ACCOUNT)).toBe(1);
     expect(await captureExamples(db, api, ACCOUNT)).toBe(0);
     expect(await raw(db).all('SELECT message_id, status FROM examples ORDER BY message_id')).toEqual([
@@ -726,7 +718,7 @@ describe("a rule of the person's", () => {
     await recordSync(own, WORK, [facts({ accountId: WORK, messageId: 'w1', from })], '2');
     const model = testModel();
     await triageAccount(
-      { db: own, mailbox: null, model, sources: quietSources() },
+      { db: own, mailbox: null, model, sources: connectGmail(fake.google, WORK) },
       (await listAccounts(own)).find((a) => a.id === WORK)!,
     );
     expect(await raw(own).get(`SELECT stage, label_id FROM decisions WHERE message_id = 'w1'`)).toEqual({ stage: 'rules', label_id: 'newsletter' });
